@@ -18,7 +18,7 @@ Item {
     readonly property bool useSeparateMenuWindow: Chiaki.window.runtimeRendererBackend === 1
     readonly property int streamMenuHeight: 200
     readonly property bool streamStatsVisible: Chiaki.settings.showStreamStats && Chiaki.session && !(menuController.open || menuController.closing) && !sessionLoading && !sessionError && !(Chiaki.settings.audioVideoDisabled & 0x02)
-    readonly property bool frameGenerationZonesVisible: Chiaki.settings.frameGenerationShowZones && Chiaki.session && !(menuController.open || menuController.closing) && !sessionLoading && !sessionError && !(Chiaki.settings.audioVideoDisabled & 0x02)
+    readonly property bool frameGenerationZonesVisible: (Chiaki.settings.frameGenerationShowZones || frameGenPanel.open) && Chiaki.session && !(menuController.open || menuController.closing) && !sessionLoading && !sessionError && !(Chiaki.settings.audioVideoDisabled & 0x02)
     property int separateMenuX: 0
     property int separateMenuY: 0
     property int separateMenuWidth: 0
@@ -71,6 +71,7 @@ Item {
         Chiaki.window.setOverlayInteractionActive(
             menuController.open ||
             menuController.closing ||
+            frameGenPanel.open ||
             sessionStopDialogActive ||
             separateSessionStopWindow.visible ||
             sessionPinDialogActive ||
@@ -102,8 +103,10 @@ Item {
             Chiaki.window.setZonesOverlayActive(frameGenerationZonesVisible);
     }
     Component.onDestruction: {
-        if (Chiaki.window)
+        if (Chiaki.window) {
             Chiaki.window.setZonesOverlayActive(false);
+            Chiaki.window.setZonesOverlayHighlight(-1);
+        }
     }
     onWidthChanged: updateSeparateMenuGeometry()
     onHeightChanged: updateSeparateMenuGeometry()
@@ -735,7 +738,7 @@ Item {
                     if(Chiaki.window.videoPreset == ChiakiWindow.VideoPreset.Custom)
                         placeboSettingsButton;
                     else
-                        displaySettingsButton;
+                        frameGenButton;
                 }
                 Keys.onReturnPressed: {
                     menuController.close();
@@ -752,11 +755,27 @@ Item {
                 checkable: false
                 onClicked: root.openPlaceboSettings()
                 KeyNavigation.left: displaySettingsButton
+                KeyNavigation.right: frameGenButton
                 visible: Chiaki.window.videoPreset == ChiakiWindow.VideoPreset.Custom
                 Keys.onReturnPressed: {
                     menuController.close();
                     clicked();
                 }
+                Keys.onEscapePressed: menuController.close()
+            }
+
+            ToolButton {
+                id: frameGenButton
+                text: qsTr("Frame Gen")
+                padding: 10
+                checkable: false
+                icon.source: "qrc:/icons/settings-20px.svg";
+                onClicked: {
+                    menuController.close();
+                    frameGenPanel.openPanel();
+                }
+                KeyNavigation.left: Chiaki.window.videoPreset == ChiakiWindow.VideoPreset.Custom ? placeboSettingsButton : displaySettingsButton
+                Keys.onReturnPressed: clicked()
                 Keys.onEscapePressed: menuController.close()
             }
             }
@@ -850,6 +869,131 @@ Item {
                             font.pixelSize: 18
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // In-stream frame generation panel: mode, zone profiles and protected zones, applied live
+    // while the game keeps running behind it (zone outlines are drawn over the video).
+    FocusScope {
+        id: frameGenPanel
+        property bool open: false
+        property bool onLeft: false
+        readonly property var modes: Chiaki.settings.frameGenerationModes
+        readonly property var labels: [qsTr("Off"), qsTr("x2"), qsTr("x3"), qsTr("x4")]
+        visible: open
+        z: 10
+        width: Math.min(parent.width - 40, 860)
+        height: Math.min(parent.height - 40, panelColumn.implicitHeight + 40)
+        anchors {
+            top: parent.top
+            topMargin: 20
+            left: onLeft ? parent.left : undefined
+            right: onLeft ? undefined : parent.right
+            leftMargin: 20
+            rightMargin: 20
+        }
+
+        function openPanel() {
+            if (open)
+                return;
+            open = true;
+            view.grabInput(panelCloseButton);
+            view.updateOverlayInteractionActive();
+        }
+
+        function closePanel() {
+            if (!open)
+                return;
+            open = false;
+            Chiaki.window.setZonesOverlayHighlight(-1);
+            view.releaseInput();
+            view.updateOverlayInteractionActive();
+        }
+
+        function modeEnabled(index) {
+            return index === 0 || (modes.length > index && modes[index].enabled);
+        }
+
+        Keys.onEscapePressed: closePanel()
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 10
+            color: Qt.rgba(0.08, 0.08, 0.1, 0.88)
+            border.color: Qt.rgba(1, 1, 1, 0.15)
+        }
+
+        ScrollView {
+            anchors.fill: parent
+            anchors.margins: 20
+            clip: true
+            contentWidth: availableWidth
+
+            ColumnLayout {
+                id: panelColumn
+                width: parent.width
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label {
+                        text: qsTr("Frame Generation")
+                        font.pixelSize: 22
+                        font.bold: true
+                        Layout.fillWidth: true
+                    }
+                    ToolButton {
+                        text: frameGenPanel.onLeft ? qsTr("Move right ⇥") : qsTr("⇤ Move left")
+                        onClicked: frameGenPanel.onLeft = !frameGenPanel.onLeft
+                    }
+                    ToolButton {
+                        id: panelCloseButton
+                        text: "×"
+                        font.pixelSize: 28
+                        onClicked: frameGenPanel.closePanel()
+                        Keys.onReturnPressed: clicked()
+                        Keys.onEscapePressed: frameGenPanel.closePanel()
+                    }
+                }
+
+                RowLayout {
+                    spacing: 4
+                    Label { text: qsTr("Mode:") }
+                    Repeater {
+                        model: 4
+                        ToolButton {
+                            required property int index
+                            text: frameGenPanel.labels[index]
+                            checkable: true
+                            checked: Chiaki.settings.frameGeneration === index
+                            enabled: frameGenPanel.modeEnabled(index)
+                            onClicked: Chiaki.settings.frameGeneration = index
+                            Keys.onReturnPressed: clicked()
+                        }
+                    }
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+                    text: qsTr("Effective mode: %1").arg(Chiaki.settings.frameGenerationEffective)
+                    visible: Chiaki.settings.frameGenerationEffective.length > 0
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+                    text: qsTr("Protected zones: generated frames show the original image inside them (use them over the game HUD). Values in % of the video, applied live.")
+                }
+
+                FrameGenerationZonesEditor {
+                    id: panelZonesEditor
+                    Layout.fillWidth: true
+                    onSelectedZoneChanged: Chiaki.window.setZonesOverlayHighlight(selectedZone)
                 }
             }
         }
@@ -1292,6 +1436,11 @@ Item {
         function onMenuRequested() {
             if (sessionPinDialog.opened || sessionStopDialog.opened || separateSessionPinWindow.visible || separateSessionStopWindow.visible)
                 return;
+            if (frameGenPanel.open) {
+                frameGenPanel.closePanel();
+                Chiaki.window.requestOverlayUpdate();
+                return;
+            }
             menuController.toggle();
             Chiaki.window.requestOverlayUpdate();
         }
@@ -1300,8 +1449,10 @@ Item {
         target: Chiaki
 
         function onSessionChanged() {
-            if (!Chiaki.session)
+            if (!Chiaki.session) {
                 menuController.close();
+                frameGenPanel.closePanel();
+            }
         }
     }
     Connections {

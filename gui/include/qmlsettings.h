@@ -112,6 +112,8 @@ class QmlSettings : public QObject
 	Q_PROPERTY(QString frameGenerationEffective READ frameGenerationEffective NOTIFY frameGenerationEffectiveChanged)
 	Q_PROPERTY(QVariantList frameGenerationZones READ frameGenerationZones NOTIFY frameGenerationZonesChanged)
 	Q_PROPERTY(bool frameGenerationShowZones READ frameGenerationShowZones WRITE setFrameGenerationShowZones NOTIFY frameGenerationZonesChanged)
+	Q_PROPERTY(QStringList frameGenerationZoneProfiles READ frameGenerationZoneProfiles NOTIFY frameGenerationZonesChanged)
+	Q_PROPERTY(QString frameGenerationZoneProfile READ frameGenerationZoneProfile WRITE setFrameGenerationZoneProfile NOTIFY frameGenerationZonesChanged)
 	Q_PROPERTY(bool placeboDeinterlaceEnabled READ placeboDeinterlaceEnabled WRITE setPlaceboDeinterlaceEnabled NOTIFY placeboDeinterlaceEnabledChanged)
 	Q_PROPERTY(int placeboDeinterlacePreset READ placeboDeinterlacePreset WRITE setPlaceboDeinterlacePreset NOTIFY placeboDeinterlacePresetChanged)
 	Q_PROPERTY(int placeboDeinterlaceAlgorithm READ placeboDeinterlaceAlgorithm WRITE setPlaceboDeinterlaceAlgorithm NOTIFY placeboDeinterlaceAlgorithmChanged)
@@ -379,6 +381,13 @@ public:
     Q_INVOKABLE void addFrameGenerationZone();
     Q_INVOKABLE void removeFrameGenerationZone(int index);
     Q_INVOKABLE void setFrameGenerationZone(int index, double x, double y, double w, double h);
+    // Zone profiles: one set of protected zones per game
+    QStringList frameGenerationZoneProfiles() const;
+    QString frameGenerationZoneProfile() const;
+    void setFrameGenerationZoneProfile(const QString &name);
+    Q_INVOKABLE QString addFrameGenerationZoneProfile(const QString &name, bool copyCurrent);
+    Q_INVOKABLE bool renameFrameGenerationZoneProfile(const QString &name);
+    Q_INVOKABLE bool removeFrameGenerationZoneProfile();
     bool frameGenerationShowZones() const;
     void setFrameGenerationShowZones(bool show);
 

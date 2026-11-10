@@ -394,6 +394,14 @@ public:
         update();
     }
 
+    void setHighlight(int index)
+    {
+        if (highlight == index)
+            return;
+        highlight = index;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -420,8 +428,10 @@ protected:
             const QRectF &z = zones[i];
             const QRectF r(video.x() + z.x() * video.width(), video.y() + z.y() * video.height(),
                            z.width() * video.width(), z.height() * video.height());
-            p.fillRect(r, QColor(255, 193, 7, 40));
-            QPen pen(QColor(255, 193, 7), 2, Qt::DashLine);
+            const bool selected = i == highlight;
+            const QColor color = selected ? QColor(0, 229, 255) : QColor(255, 193, 7);
+            p.fillRect(r, QColor(color.red(), color.green(), color.blue(), selected ? 60 : 40));
+            QPen pen(color, selected ? 3 : 2, selected ? Qt::SolidLine : Qt::DashLine);
             p.setPen(pen);
             p.drawRect(r.adjusted(1, 1, -1, -1));
             p.drawText(r.adjusted(6, 4, -4, -4), Qt::AlignLeft | Qt::AlignTop, QStringLiteral("%1").arg(i + 1));
@@ -431,6 +441,7 @@ protected:
 private:
     QPointer<QmlMainWindow> owner;
     Settings *settings = nullptr;
+    int highlight = -1;
 };
 
 class DeferredPresentPacerThread final : public QThread
@@ -2996,8 +3007,15 @@ void QmlMainWindow::updateZonesOverlay()
 {
     if (!zones_overlay_widget)
         return;
-    const bool show = zones_overlay_requested && settings && settings->GetFrameGenerationShowZones();
-    zones_overlay_widget->setOverlayVisible(show);
+    zones_overlay_widget->setHighlight(zones_overlay_highlight);
+    zones_overlay_widget->setOverlayVisible(zones_overlay_requested);
+}
+
+void QmlMainWindow::setZonesOverlayHighlight(int index)
+{
+    zones_overlay_highlight = index;
+    if (zones_overlay_widget)
+        zones_overlay_widget->setHighlight(index);
 }
 
 bool QmlMainWindow::directStream() const

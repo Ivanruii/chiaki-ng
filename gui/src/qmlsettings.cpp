@@ -1073,6 +1073,47 @@ void QmlSettings::setFrameGenerationZone(int index, double x, double y, double w
     emit frameGenerationZonesChanged();
 }
 
+QStringList QmlSettings::frameGenerationZoneProfiles() const
+{
+    return settings->GetFrameGenerationZoneProfiles();
+}
+
+QString QmlSettings::frameGenerationZoneProfile() const
+{
+    return settings->GetFrameGenerationZoneProfile();
+}
+
+void QmlSettings::setFrameGenerationZoneProfile(const QString &name)
+{
+    if (name == settings->GetFrameGenerationZoneProfile())
+        return;
+    if (settings->SetFrameGenerationZoneProfile(name))
+        emit frameGenerationZonesChanged();
+}
+
+QString QmlSettings::addFrameGenerationZoneProfile(const QString &name, bool copyCurrent)
+{
+    const QString created = settings->AddFrameGenerationZoneProfile(name, copyCurrent);
+    emit frameGenerationZonesChanged();
+    return created;
+}
+
+bool QmlSettings::renameFrameGenerationZoneProfile(const QString &name)
+{
+    const bool ok = settings->RenameFrameGenerationZoneProfile(name);
+    if (ok)
+        emit frameGenerationZonesChanged();
+    return ok;
+}
+
+bool QmlSettings::removeFrameGenerationZoneProfile()
+{
+    const bool ok = settings->RemoveFrameGenerationZoneProfile();
+    if (ok)
+        emit frameGenerationZonesChanged();
+    return ok;
+}
+
 bool QmlSettings::frameGenerationShowZones() const
 {
     return settings->GetFrameGenerationShowZones();

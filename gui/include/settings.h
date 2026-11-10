@@ -526,9 +526,16 @@ class Settings : public QObject
 		// Frame generation multiplier: 1 = off, 2..4 = x2..x4 (stored as "off"/"x2"/"x3"/"x4")
 		int GetFrameGenerationMultiplier() const;
 		void SetFrameGenerationMultiplier(int multiplier);
-		// Protected zones (e.g. game HUD) in normalized video coordinates (0..1)
+		// Protected zones (e.g. game HUD) of the active zone profile, normalized video coordinates (0..1)
 		QList<QRectF> GetFrameGenerationZones() const;
 		void SetFrameGenerationZones(const QList<QRectF> &zones);
+		// Zone profiles (one set of zones per game); Get/SetFrameGenerationZones act on the active one
+		QStringList GetFrameGenerationZoneProfiles() const;
+		QString GetFrameGenerationZoneProfile() const;
+		bool SetFrameGenerationZoneProfile(const QString &name);
+		QString AddFrameGenerationZoneProfile(const QString &name, bool copy_current);
+		bool RenameFrameGenerationZoneProfile(const QString &new_name);
+		bool RemoveFrameGenerationZoneProfile();
 		bool GetFrameGenerationShowZones() const { return settings.value("settings/frame_generation_show_zones", false).toBool(); }
 		void SetFrameGenerationShowZones(bool show) { settings.setValue("settings/frame_generation_show_zones", show); }
 

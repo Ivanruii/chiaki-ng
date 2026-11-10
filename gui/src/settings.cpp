@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <settings.h>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
 #include <SDL.h>
 #include <QFile>
 #include <QFileInfo>
@@ -1329,11 +1332,16 @@ void Settings::SetFrameGenerationMultiplier(int multiplier)
 	settings.setValue("settings/frame_generation", multiplier >= 2 && multiplier <= 4 ? QStringLiteral("x%1").arg(multiplier) : QStringLiteral("off"));
 }
 
-QList<QRectF> Settings::GetFrameGenerationZones() const
+namespace {
+
+const QString kFgProfilesKey = QStringLiteral("settings/frame_generation_zone_profiles");
+const QString kFgLegacyZonesKey = QStringLiteral("settings/frame_generation_zones");
+const QString kFgDefaultProfile = QStringLiteral("Default");
+
+QList<QRectF> parseZones(const QString &value)
 {
 	// "x,y,w,h;x,y,w,h" with normalized values
 	QList<QRectF> zones;
-	const QString value = settings.value("settings/frame_generation_zones").toString();
 	for (const QString &item : value.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
 		const QStringList parts = item.split(QLatin1Char(','));
 		if (parts.size() != 4)
@@ -1346,12 +1354,147 @@ QList<QRectF> Settings::GetFrameGenerationZones() const
 	return zones;
 }
 
-void Settings::SetFrameGenerationZones(const QList<QRectF> &zones)
+QString serializeZones(const QList<QRectF> &zones)
 {
 	QStringList items;
 	for (const QRectF &r : zones)
 		items << QStringLiteral("%1,%2,%3,%4").arg(r.x(), 0, 'f', 4).arg(r.y(), 0, 'f', 4).arg(r.width(), 0, 'f', 4).arg(r.height(), 0, 'f', 4);
-	settings.setValue("settings/frame_generation_zones", items.join(QLatin1Char(';')));
+	return items.join(QLatin1Char(';'));
+}
+
+// {"active": name, "profiles": [{"name": ..., "zones": "x,y,w,h;..."}]}
+QJsonObject loadFgProfiles(const QSettings &settings)
+{
+	QJsonObject root = QJsonDocument::fromJson(settings.value(kFgProfilesKey).toString().toUtf8()).object();
+	QJsonArray profiles = root.value(QStringLiteral("profiles")).toArray();
+	if (profiles.isEmpty()) {
+		// first use: zones saved before profiles existed become the default profile
+		QJsonObject def;
+		def[QStringLiteral("name")] = kFgDefaultProfile;
+		def[QStringLiteral("zones")] = settings.value(kFgLegacyZonesKey).toString();
+		profiles.append(def);
+		root[QStringLiteral("profiles")] = profiles;
+	}
+	bool active_found = false;
+	const QString active = root.value(QStringLiteral("active")).toString();
+	for (const QJsonValue &v : profiles)
+		active_found |= v.toObject().value(QStringLiteral("name")).toString() == active;
+	if (!active_found)
+		root[QStringLiteral("active")] = profiles.first().toObject().value(QStringLiteral("name")).toString();
+	return root;
+}
+
+void saveFgProfiles(QSettings &settings, const QJsonObject &root)
+{
+	settings.setValue(kFgProfilesKey, QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact)));
+}
+
+int findFgProfile(const QJsonArray &profiles, const QString &name)
+{
+	for (int i = 0; i < profiles.size(); i++)
+		if (profiles[i].toObject().value(QStringLiteral("name")).toString() == name)
+			return i;
+	return -1;
+}
+
+} // namespace
+
+QList<QRectF> Settings::GetFrameGenerationZones() const
+{
+	const QJsonObject root = loadFgProfiles(settings);
+	const QJsonArray profiles = root.value(QStringLiteral("profiles")).toArray();
+	const int i = findFgProfile(profiles, root.value(QStringLiteral("active")).toString());
+	return i < 0 ? QList<QRectF>() : parseZones(profiles[i].toObject().value(QStringLiteral("zones")).toString());
+}
+
+void Settings::SetFrameGenerationZones(const QList<QRectF> &zones)
+{
+	QJsonObject root = loadFgProfiles(settings);
+	QJsonArray profiles = root.value(QStringLiteral("profiles")).toArray();
+	const int i = findFgProfile(profiles, root.value(QStringLiteral("active")).toString());
+	if (i < 0)
+		return;
+	QJsonObject p = profiles[i].toObject();
+	p[QStringLiteral("zones")] = serializeZones(zones);
+	profiles[i] = p;
+	root[QStringLiteral("profiles")] = profiles;
+	saveFgProfiles(settings, root);
+}
+
+QStringList Settings::GetFrameGenerationZoneProfiles() const
+{
+	QStringList names;
+	for (const QJsonValue &v : loadFgProfiles(settings).value(QStringLiteral("profiles")).toArray())
+		names << v.toObject().value(QStringLiteral("name")).toString();
+	return names;
+}
+
+QString Settings::GetFrameGenerationZoneProfile() const
+{
+	return loadFgProfiles(settings).value(QStringLiteral("active")).toString();
+}
+
+bool Settings::SetFrameGenerationZoneProfile(const QString &name)
+{
+	QJsonObject root = loadFgProfiles(settings);
+	if (findFgProfile(root.value(QStringLiteral("profiles")).toArray(), name) < 0)
+		return false;
+	root[QStringLiteral("active")] = name;
+	saveFgProfiles(settings, root);
+	return true;
+}
+
+QString Settings::AddFrameGenerationZoneProfile(const QString &requested_name, bool copy_current)
+{
+	QJsonObject root = loadFgProfiles(settings);
+	QJsonArray profiles = root.value(QStringLiteral("profiles")).toArray();
+	QString base = requested_name.trimmed();
+	if (base.isEmpty())
+		base = QStringLiteral("Game");
+	QString name = base;
+	for (int n = 2; findFgProfile(profiles, name) >= 0; n++)
+		name = QStringLiteral("%1 %2").arg(base).arg(n);
+	QJsonObject p;
+	p[QStringLiteral("name")] = name;
+	const int current = findFgProfile(profiles, root.value(QStringLiteral("active")).toString());
+	p[QStringLiteral("zones")] = copy_current && current >= 0 ? profiles[current].toObject().value(QStringLiteral("zones")).toString() : QString();
+	profiles.append(p);
+	root[QStringLiteral("profiles")] = profiles;
+	root[QStringLiteral("active")] = name;
+	saveFgProfiles(settings, root);
+	return name;
+}
+
+bool Settings::RenameFrameGenerationZoneProfile(const QString &new_name)
+{
+	const QString name = new_name.trimmed();
+	QJsonObject root = loadFgProfiles(settings);
+	QJsonArray profiles = root.value(QStringLiteral("profiles")).toArray();
+	const QString active = root.value(QStringLiteral("active")).toString();
+	const int i = findFgProfile(profiles, active);
+	if (name.isEmpty() || i < 0 || (name != active && findFgProfile(profiles, name) >= 0))
+		return false;
+	QJsonObject p = profiles[i].toObject();
+	p[QStringLiteral("name")] = name;
+	profiles[i] = p;
+	root[QStringLiteral("profiles")] = profiles;
+	root[QStringLiteral("active")] = name;
+	saveFgProfiles(settings, root);
+	return true;
+}
+
+bool Settings::RemoveFrameGenerationZoneProfile()
+{
+	QJsonObject root = loadFgProfiles(settings);
+	QJsonArray profiles = root.value(QStringLiteral("profiles")).toArray();
+	const int i = findFgProfile(profiles, root.value(QStringLiteral("active")).toString());
+	if (i < 0 || profiles.size() <= 1)
+		return false; // always keep one profile
+	profiles.removeAt(i);
+	root[QStringLiteral("profiles")] = profiles;
+	root[QStringLiteral("active")] = profiles[qMin(i, profiles.size() - 1)].toObject().value(QStringLiteral("name")).toString();
+	saveFgProfiles(settings, root);
+	return true;
 }
 
 bool Settings::GetPlaceboDeinterlaceEnabled() const

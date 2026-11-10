@@ -1088,79 +1088,24 @@ DialogView {
                             Layout.fillWidth: true
                             Layout.topMargin: 10
                             wrapMode: Text.Wrap
-                            text: qsTr("Protected zones (game HUD): generated frames show the original image there, without interpolation. Values in % of the video.")
+                            text: qsTr("Protected zones (game HUD): generated frames show the original image there, without interpolation. Values in % of the video; one profile per game.")
                         }
 
-                        Repeater {
-                            id: frameGenerationZones
-                            model: Chiaki.settings.frameGenerationZones
-
-                            RowLayout {
-                                id: zoneRow
-                                required property var modelData
-                                required property int index
-                                spacing: 4
-
-                                function commit(x, y, w, h) {
-                                    Chiaki.settings.setFrameGenerationZone(index, x, y, w, h);
-                                }
-
-                                Label { text: qsTr("Zone %1").arg(zoneRow.index + 1); Layout.preferredWidth: 60 }
-
-                                Repeater {
-                                    model: [
-                                        { key: "x", label: qsTr("X") },
-                                        { key: "y", label: qsTr("Y") },
-                                        { key: "w", label: qsTr("W") },
-                                        { key: "h", label: qsTr("H") }
-                                    ]
-                                    RowLayout {
-                                        required property var modelData
-                                        spacing: 2
-                                        Label { text: modelData.label }
-                                        SpinBox {
-                                            id: zoneSpin
-                                            Layout.preferredWidth: 120
-                                            from: 0
-                                            to: 1000
-                                            stepSize: 5
-                                            editable: true
-                                            value: Math.round(zoneRow.modelData[modelData.key] * 10)
-                                            textFromValue: (v, locale) => (v / 10).toFixed(1)
-                                            valueFromText: (text, locale) => Math.round(parseFloat(text.replace(",", ".")) * 10)
-                                            onValueModified: {
-                                                const z = {
-                                                    x: zoneRow.modelData.x, y: zoneRow.modelData.y,
-                                                    w: zoneRow.modelData.w, h: zoneRow.modelData.h
-                                                };
-                                                z[modelData.key] = value / 10;
-                                                zoneRow.commit(z.x, z.y, z.w, z.h);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                C.Button {
-                                    text: qsTr("Remove")
-                                    Material.roundedScale: Material.SmallScale
-                                    onClicked: Chiaki.settings.removeFrameGenerationZone(zoneRow.index)
-                                }
-                            }
+                        FrameGenerationZonesEditor {
+                            Layout.fillWidth: true
                         }
 
-                        RowLayout {
-                            spacing: 12
-                            C.Button {
-                                text: qsTr("Add zone")
-                                Material.roundedScale: Material.SmallScale
-                                enabled: Chiaki.settings.frameGenerationZones.length < 16
-                                onClicked: Chiaki.settings.addFrameGenerationZone()
-                            }
-                            C.CheckBox {
-                                text: qsTr("Show zone outlines while streaming")
-                                checked: Chiaki.settings.frameGenerationShowZones
-                                onToggled: Chiaki.settings.frameGenerationShowZones = checked
-                            }
+                        C.CheckBox {
+                            text: qsTr("Show zone outlines while streaming")
+                            checked: Chiaki.settings.frameGenerationShowZones
+                            onToggled: Chiaki.settings.frameGenerationShowZones = checked
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            opacity: 0.7
+                            text: qsTr("While streaming, the quick menu has a Frame Gen panel to change the mode, switch profiles and place zones over the game.")
                         }
 
                         Label {
