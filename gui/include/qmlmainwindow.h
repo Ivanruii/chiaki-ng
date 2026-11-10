@@ -111,6 +111,12 @@ public:
 
     bool hasVideo() const;
     int droppedFrames() const;
+    // Frame counters for the stats HUD: frames decoded from the stream (originals) and
+    // frames handed to the renderer for display (originals + generated). Thread-safe.
+    void noteStreamFrame() { fps_stream_frames.fetch_add(1, std::memory_order_relaxed); }
+    void noteShownFrame() { fps_shown_frames.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t streamFrameCount() const { return fps_stream_frames.load(std::memory_order_relaxed); }
+    uint64_t shownFrameCount() const { return fps_shown_frames.load(std::memory_order_relaxed); }
     void increaseDroppedFrames();
 
     bool directStream() const;
@@ -323,6 +329,8 @@ private:
     bool is_window_adjustable = false;
     bool is_stream_window_adjustable = false;
     QAtomicInteger<int> dropped_frames_current = 0;
+    std::atomic<uint64_t> fps_stream_frames{0};
+    std::atomic<uint64_t> fps_shown_frames{0};
     bool going_full = false;
     VideoMode video_mode = VideoMode::Normal;
     float zoom_factor = 0;

@@ -214,6 +214,7 @@ bool FrameGenerator::start(const Config &config, QString *error)
 	cfg.source_fps = config.source_fps > 1.0 ? config.source_fps : 60.0;
 	requested_multiplier.store(cfg.multiplier);
 	active_multiplier = cfg.multiplier;
+	effective_multiplier.store(cfg.multiplier);
 	stopping = false;
 	interop_gpu = true;
 	generation_failed = false;
@@ -314,6 +315,7 @@ void FrameGenerator::disableGeneration(const QString &reason)
 {
 	generation_failed = true;
 	active_multiplier = 1;
+	effective_multiplier.store(1);
 	if (engine)
 		engine->reset();
 	setStatus(tr("Disabled during the stream, showing original frames: %1").arg(reason));
@@ -476,6 +478,7 @@ void FrameGenerator::process(Input &in)
 	const int requested = requested_multiplier.load();
 	if (requested != active_multiplier && !(generation_failed && requested > 1)) {
 		active_multiplier = requested;
+		effective_multiplier.store(requested);
 		discontinuity = true;
 		if (engine)
 			engine->reset();

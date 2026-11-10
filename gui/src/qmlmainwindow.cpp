@@ -173,9 +173,17 @@ public:
         pendingRow = makeRow(tr("pending frame age"), QColor(QStringLiteral("#90caf9")), titleFont, valueFont, pendingAgeValue);
         packetLossRow = makeRow(tr("packet loss"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, packetLossValue);
         droppedFramesRow = makeRow(tr("dropped frames"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, droppedFramesValue);
+        streamFpsRow = makeRow(tr("stream FPS"), QColor(QStringLiteral("#a5d6a7")), titleFont, valueFont, streamFpsValue);
+        shownFpsRow = makeRow(tr("displayed FPS"), QColor(QStringLiteral("#a5d6a7")), titleFont, valueFont, shownFpsValue);
         lostFramesRow = makeRow(tr("lost frames"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, lostFramesValue);
 
         outer->addWidget(panel, 0, Qt::AlignRight | Qt::AlignVCenter);
+
+        // FPS without frame generation (decoded stream frames) and with it (frames sent to
+        // display, originals + generated), measured over one-second windows.
+        fps_timer = new QTimer(this);
+        fps_timer->setInterval(1000);
+        connect(fps_timer, &QTimer::timeout, this, &StatsOverlayWidget::sampleFps);
 
         connect(owner, &QmlMainWindow::queueDepthAverageChanged, this, &StatsOverlayWidget::refresh);
         connect(owner, &QmlMainWindow::pendingFrameAgeChanged, this, &StatsOverlayWidget::refresh);
@@ -190,9 +198,35 @@ public:
         refresh();
     }
 
+    void sampleFps()
+    {
+        if (!owner)
+            return;
+        const uint64_t stream = owner->streamFrameCount();
+        const uint64_t shown = owner->shownFrameCount();
+        const qint64 elapsed_ms = fps_clock.isValid() ? fps_clock.restart() : 0;
+        if (elapsed_ms > 0 && fps_sampled) {
+            stream_fps = (stream - last_stream_frames) * 1000.0 / elapsed_ms;
+            shown_fps = (shown - last_shown_frames) * 1000.0 / elapsed_ms;
+        }
+        if (!fps_clock.isValid())
+            fps_clock.start();
+        last_stream_frames = stream;
+        last_shown_frames = shown;
+        fps_sampled = true;
+        refresh();
+    }
+
     void setOverlayVisible(bool visible)
     {
         if (visible) {
+            if (fps_timer && !fps_timer->isActive()) {
+                fps_sampled = false;
+                fps_clock.invalidate();
+                stream_fps = shown_fps = -1.0;
+                sampleFps();
+                fps_timer->start();
+            }
             updateTransientParent();
             syncGeometry();
             refresh();
@@ -202,6 +236,8 @@ public:
             if (owner)
                 owner->requestActivate();
         } else {
+            if (fps_timer)
+                fps_timer->stop();
             if (QWindow *overlay_window = windowHandle())
                 overlay_window->setTransientParent(nullptr);
             hide();
@@ -273,6 +309,16 @@ public:
             lostFramesValue->setText(QString::number(session->GetFramesLost()));
         else
             lostFramesValue->clear();
+
+        streamFpsRow->setVisible(hasSession);
+        shownFpsRow->setVisible(hasSession);
+        if (hasSession) {
+            const int multiplier = backend ? backend->frameGenerationActiveMultiplier() : 1;
+            const QString mode = multiplier > 1 ? tr("x%1").arg(multiplier) : tr("off");
+            streamFpsValue->setText(stream_fps >= 0.0 ? QString::number(stream_fps, 'f', 1) : QStringLiteral("…"));
+            shownFpsValue->setText(QStringLiteral("%1 (%2)")
+                .arg(shown_fps >= 0.0 ? QString::number(shown_fps, 'f', 1) : QStringLiteral("…"), mode));
+        }
     }
 
 private:
@@ -291,6 +337,17 @@ private:
     QLabel *packetLossValue = nullptr;
     QLabel *droppedFramesValue = nullptr;
     QLabel *lostFramesValue = nullptr;
+    QWidget *streamFpsRow = nullptr;
+    QWidget *shownFpsRow = nullptr;
+    QLabel *streamFpsValue = nullptr;
+    QLabel *shownFpsValue = nullptr;
+    QTimer *fps_timer = nullptr;
+    QElapsedTimer fps_clock;
+    bool fps_sampled = false;
+    uint64_t last_stream_frames = 0;
+    uint64_t last_shown_frames = 0;
+    double stream_fps = -1.0;
+    double shown_fps = -1.0;
 };
 
 class DeferredPresentPacerThread final : public QThread
@@ -2237,6 +2294,8 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex,
         av_frame_free(&frame);
         return false;
     }
+    if (q)
+        q->noteShownFrame();
     return true;
 }
 
@@ -6838,6 +6897,8 @@ void QmlMainWindow::render()
                 direct_frame = {};
                 if (backend && backend->zeroCopy())
                     backend->disableZeroCopy();
+            } else {
+                noteShownFrame();
             }
             av_frame_free(&incoming);
         }

@@ -120,6 +120,8 @@ public:
 	// 1 = pass-through. Takes effect on the next original and resets the interpolator.
 	void setMultiplier(int multiplier);
 	int multiplier() const { return requested_multiplier.load(); }
+	// Multiplier actually applied (1 after a runtime failure or while off)
+	int effectiveMultiplier() const { return effective_multiplier.load(); }
 
 	FrameGeneratorStats stats() const;
 	QString status() const;
@@ -156,6 +158,7 @@ private:
 	std::deque<Input> inputs;
 	std::deque<Output> outputs;
 	std::atomic<int> requested_multiplier{1};
+	std::atomic<int> effective_multiplier{1};
 	int active_multiplier = 1;
 
 	// worker-thread state

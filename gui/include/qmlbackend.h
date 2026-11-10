@@ -96,6 +96,9 @@ class QmlBackend : public QObject
     Q_PROPERTY(bool enableAnalogStickMapping READ enableAnalogStickMapping WRITE setEnableAnalogStickMapping NOTIFY enableAnalogStickMappingChanged)
 
 public:
+    // 1 when frame generation is off or unavailable for the current session
+    int frameGenerationActiveMultiplier() const { return frame_generator ? frame_generator->effectiveMultiplier() : 1; }
+
 
     enum class PsnConnectState
     {
