@@ -61,6 +61,21 @@ jobs:
             vulkan:p
             vulkan-headers:p
 
+      - name: Pin Qt 6.11.2
+        # MSYS2's Qt 6.12.0 makes chiaki-ng crash at startup (access violation in
+        # Qt6Qml.dll, QQmlData::isSignalConnected), also on unmodified upstream code.
+        run: |
+          repo=https://repo.msys2.org/mingw/mingw64
+          curl -sfL "$repo/" -o /tmp/msys2-index.html
+          urls=""
+          for pkg in $(pacman -Qq | grep '^mingw-w64-x86_64-qt6-'); do
+            f=$(grep -o "${pkg}-6\.11\.2-[0-9]*-any\.pkg\.tar\.zst\"" /tmp/msys2-index.html | tr -d '"' | sort -V | tail -1)
+            if [ -z "$f" ]; then echo "No Qt 6.11.2 build of $pkg"; exit 1; fi
+            urls="$urls $repo/$f"
+          done
+          pacman -U --noconfirm $urls
+          pacman -Q | grep qt6-
+
       - name: Install python protobuf and zip
         run: |
           pip install protobuf
