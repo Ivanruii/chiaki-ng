@@ -21,6 +21,7 @@ extern "C" {
 }
 
 #include <QByteArray>
+#include <QScreen>
 #include <QPointer>
 #include <QColor>
 #include <QDebug>
@@ -4618,6 +4619,28 @@ void QmlMainWindow::queuePendingFrameRelease()
     scheduleUpdate(false, QmlMainWindow::UpdateRequestReason::PendingFrame);
 }
 
+bool QmlMainWindow::frameQueueBacklogged() const
+{
+    // A frame already waiting for a free queue slot means the renderer is behind
+    return pending_frame_present.loadAcquire() != 0 || pending_frame_submission_active.loadAcquire() != 0;
+}
+
+QStringList QmlMainWindow::vulkanDeviceExtensions() const
+{
+    QStringList out;
+    if (render_backend != RenderBackend::Vulkan || !placebo_vulkan)
+        return out;
+    for (int i = 0; i < placebo_vulkan->num_extensions; i++)
+        out << QString::fromUtf8(placebo_vulkan->extensions[i]);
+    return out;
+}
+
+double QmlMainWindow::displayRefreshRate() const
+{
+    QScreen *s = screen();
+    return s ? s->refreshRate() : 0.0;
+}
+
 bool QmlMainWindow::hasPendingFrame() const
 {
     return pending_frame_present.loadAcquire() != 0;
@@ -5022,6 +5045,15 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+            // External memory/semaphores let frame generation hand CUDA frames to the
+            // renderer without a CPU copy (FFmpeg CUDA -> Vulkan interop)
+#if defined(Q_OS_WIN)
+            "VK_KHR_external_memory_win32",
+            "VK_KHR_external_semaphore_win32",
+#else
+            "VK_KHR_external_memory_fd",
+            "VK_KHR_external_semaphore_fd",
+#endif
         };
 
         struct pl_vulkan_params vulkan_params = {
@@ -5031,7 +5063,7 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             PL_VULKAN_DEFAULTS
             .extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
             .opt_extensions = opt_dev_extensions,
-            .num_opt_extensions = 4,
+            .num_opt_extensions = static_cast<int>(sizeof(opt_dev_extensions) / sizeof(opt_dev_extensions[0])),
         };
         placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);
         if (!placebo_vulkan) {

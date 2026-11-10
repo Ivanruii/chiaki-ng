@@ -989,6 +989,45 @@ void QmlSettings::setDirectFrameMapping(bool enabled)
     emit directFrameMappingChanged();
 }
 
+int QmlSettings::frameGeneration() const
+{
+    return qBound(0, settings->GetFrameGenerationMultiplier() - 1, 3);
+}
+
+void QmlSettings::setFrameGeneration(int index)
+{
+    const int multiplier = qBound(0, index, 3) + 1;
+    if (multiplier == settings->GetFrameGenerationMultiplier())
+        return;
+    settings->SetFrameGenerationMultiplier(multiplier);
+    emit frameGenerationChanged();
+}
+
+int QmlSettings::frameGenerationSourceFps() const
+{
+    const unsigned int fps = settings->GetVideoProfileLocalPS5().max_fps;
+    return fps > 0 ? static_cast<int>(fps) : 60;
+}
+
+void QmlSettings::setFrameGenerationCapabilities(const QVariantList &modes, bool probing, const QString &summary,
+                                                 const QString &nvfruc, const QString &self_test)
+{
+    fg_modes = modes;
+    fg_probing = probing;
+    fg_summary = summary;
+    fg_nvfruc = nvfruc;
+    fg_self_test = self_test;
+    emit frameGenerationCapabilitiesChanged();
+}
+
+void QmlSettings::setFrameGenerationEffective(const QString &effective)
+{
+    if (fg_effective == effective)
+        return;
+    fg_effective = effective;
+    emit frameGenerationEffectiveChanged();
+}
+
 void QmlSettings::setPlaceboFrameMixer(int mixer)
 {
     settings->SetPlaceboFrameMixer(static_cast<PlaceboFrameMixer>(mixer));

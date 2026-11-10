@@ -54,6 +54,13 @@ set(SOURCE_FILES
 	src/qmlsvgprovider.cpp
 	include/systemdinhibit.h
 	src/systemdinhibit.cpp
+	include/framegen/cuda_dyn.h
+	src/framegen/cuda_dyn.cpp
+	include/framegen/ofa_interpolator.h
+	src/framegen/ofa_interpolator.cpp
+	src/framegen/framegen_kernels_ptx.h
+	include/framegen/framegenerator.h
+	src/framegen/framegenerator.cpp
 	)
 set(RESOURCE_FILES "")
 
@@ -97,6 +104,20 @@ target_include_directories(chiaki PRIVATE include)
 add_library(placebo-libav-impl src/libav_impl.c)
 target_link_libraries(placebo-libav-impl PkgConfig::LIBPLACEBO FFMPEG::avcodec FFMPEG::avutil FFMPEG::avformat)
 target_link_libraries(chiaki PkgConfig::LIBPLACEBO placebo-libav-impl)
+# Frame generation loads the NVIDIA driver libraries (CUDA, optical flow) at runtime
+target_link_libraries(chiaki ${CMAKE_DL_LIBS})
+
+# Standalone GPU check of the frame generation engine (no Qt/FFmpeg needed)
+option(CHIAKI_FRAMEGEN_SELFTEST "Build the frame generation GPU self test" OFF)
+if(CHIAKI_FRAMEGEN_SELFTEST)
+	add_executable(chiaki-framegen-selftest
+		src/framegen/cuda_dyn.cpp
+		src/framegen/ofa_interpolator.cpp
+		src/framegen/tests/ofa_selftest.cpp)
+	target_include_directories(chiaki-framegen-selftest PRIVATE include src/framegen)
+	target_link_libraries(chiaki-framegen-selftest ${CMAKE_DL_LIBS})
+	set_target_properties(chiaki-framegen-selftest PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+endif()
 
 target_link_libraries(chiaki chiaki-lib)
 if(CHIAKI_ENABLE_CLI)

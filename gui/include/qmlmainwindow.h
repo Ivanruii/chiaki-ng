@@ -4,6 +4,7 @@
 #include "settings.h"
 
 #include <QMutex>
+#include <QStringList>
 #include <QAtomicInteger>
 #include <QWindow>
 #include <QQuickWindow>
@@ -131,6 +132,10 @@ public:
 
     bool amdCard() const;
     bool nvidiaCard() const;
+    // Thread-safe: true while decoded frames wait for room in the render queue
+    bool frameQueueBacklogged() const;
+    QStringList vulkanDeviceExtensions() const;
+    double displayRefreshRate() const;
     bool wasMaximized() const { return was_maximized; };
     bool isWindowAdjustable() const { return is_window_adjustable; }
     void setWindowAdjustable(bool adjustable) { is_window_adjustable = adjustable; }

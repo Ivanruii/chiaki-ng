@@ -2,6 +2,8 @@
 
 #include "settings.h"
 
+#include <QVariantList>
+
 class QmlSettings : public QObject
 {
     Q_OBJECT
@@ -100,6 +102,14 @@ class QmlSettings : public QObject
 	Q_PROPERTY(int placeboPlaneDownscaler READ placeboPlaneDownscaler WRITE setPlaceboPlaneDownscaler NOTIFY placeboPlaneDownscalerChanged)
 	Q_PROPERTY(int placeboFrameMixer READ placeboFrameMixer WRITE setPlaceboFrameMixer NOTIFY placeboFrameMixerChanged)
 	Q_PROPERTY(bool directFrameMapping READ directFrameMapping WRITE setDirectFrameMapping NOTIFY directFrameMappingChanged)
+	Q_PROPERTY(int frameGeneration READ frameGeneration WRITE setFrameGeneration NOTIFY frameGenerationChanged)
+	Q_PROPERTY(int frameGenerationSourceFps READ frameGenerationSourceFps NOTIFY frameGenerationChanged)
+	Q_PROPERTY(QVariantList frameGenerationModes READ frameGenerationModes NOTIFY frameGenerationCapabilitiesChanged)
+	Q_PROPERTY(bool frameGenerationProbing READ frameGenerationProbing NOTIFY frameGenerationCapabilitiesChanged)
+	Q_PROPERTY(QString frameGenerationSummary READ frameGenerationSummary NOTIFY frameGenerationCapabilitiesChanged)
+	Q_PROPERTY(QString frameGenerationNvfruc READ frameGenerationNvfruc NOTIFY frameGenerationCapabilitiesChanged)
+	Q_PROPERTY(QString frameGenerationSelfTest READ frameGenerationSelfTest NOTIFY frameGenerationCapabilitiesChanged)
+	Q_PROPERTY(QString frameGenerationEffective READ frameGenerationEffective NOTIFY frameGenerationEffectiveChanged)
 	Q_PROPERTY(bool placeboDeinterlaceEnabled READ placeboDeinterlaceEnabled WRITE setPlaceboDeinterlaceEnabled NOTIFY placeboDeinterlaceEnabledChanged)
 	Q_PROPERTY(int placeboDeinterlacePreset READ placeboDeinterlacePreset WRITE setPlaceboDeinterlacePreset NOTIFY placeboDeinterlacePresetChanged)
 	Q_PROPERTY(int placeboDeinterlaceAlgorithm READ placeboDeinterlaceAlgorithm WRITE setPlaceboDeinterlaceAlgorithm NOTIFY placeboDeinterlaceAlgorithmChanged)
@@ -348,6 +358,20 @@ public:
     bool directFrameMapping() const;
     void setDirectFrameMapping(bool enabled);
     void setPlaceboFrameMixer(int mixer);
+
+    // Frame generation: slider index 0 = off, 1..3 = x2..x4
+    int frameGeneration() const;
+    void setFrameGeneration(int index);
+    int frameGenerationSourceFps() const;
+    QVariantList frameGenerationModes() const { return fg_modes; }
+    bool frameGenerationProbing() const { return fg_probing; }
+    QString frameGenerationSummary() const { return fg_summary; }
+    QString frameGenerationNvfruc() const { return fg_nvfruc; }
+    QString frameGenerationSelfTest() const { return fg_self_test; }
+    QString frameGenerationEffective() const { return fg_effective; }
+    void setFrameGenerationCapabilities(const QVariantList &modes, bool probing, const QString &summary,
+                                        const QString &nvfruc, const QString &self_test);
+    void setFrameGenerationEffective(const QString &effective);
 
     bool placeboDeinterlaceEnabled() const;
     void setPlaceboDeinterlaceEnabled(bool enabled);
@@ -704,6 +728,9 @@ signals:
     void placeboPlaneDownscalerChanged();
     void placeboFrameMixerChanged();
     void directFrameMappingChanged();
+    void frameGenerationChanged();
+    void frameGenerationCapabilitiesChanged();
+    void frameGenerationEffectiveChanged();
     void placeboDeinterlaceEnabledChanged();
     void placeboDeinterlacePresetChanged();
     void placeboDeinterlaceAlgorithmChanged();
@@ -769,6 +796,12 @@ signals:
 
 private:
     Settings *settings = {};
+    QVariantList fg_modes;
+    bool fg_probing = true;
+    QString fg_summary;
+    QString fg_nvfruc;
+    QString fg_self_test;
+    QString fg_effective;
     QStringList audio_in_devices;
     QStringList audio_out_devices;
 };

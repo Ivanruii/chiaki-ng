@@ -5,6 +5,7 @@
 #include "qmlmainwindow.h"
 #include "qmlcontroller.h"
 #include "qmlsettings.h"
+#include "framegen/framegenerator.h"
 
 #include <QObject>
 #include <QMutex>
@@ -282,6 +283,11 @@ private:
     void updateStreamShortcut();
     QString getExecutable();
     void teardownSession();
+    void startFrameGenerationProbe();
+    void publishFrameGenerationCapabilities();
+    int resolveFrameGenerationMultiplier(int requested, QString *reason);
+    void applyFrameGenerationSetting();
+    void stopFrameGenerator();
 
     Settings *settings = {};
     QmlSettings *settings_qml = {};
@@ -316,6 +322,14 @@ private:
     QSet<int> logged_hw_transfer_formats;
     QSet<int> logged_hw_transfer_failures;
     QAtomicInteger<int> pending_recovered_frame = 0;
+    // Frame generation (see framegen/framegenerator.h)
+    framegen::FrameGenerator *frame_generator = {};
+    QAtomicInteger<int> frame_generator_active = 0;
+    QFuture<void> fg_probe_future;
+    QMutex fg_caps_mutex;
+    framegen::Capabilities fg_caps;
+    AVBufferRef *fg_cuda_device = {};
+    double fg_session_fps = 60.0;
     Controller *controller_mapping_controller = {};
     QMap<QString, QStringList> controller_guids_to_update = {};
     int controller_mapping_id = -1;

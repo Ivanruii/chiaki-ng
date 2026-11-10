@@ -323,6 +323,8 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
             window,
             &QmlMainWindow::updateVulkanDeferredSwap,
             Qt::QueuedConnection);
+    connect(settings_qml, &QmlSettings::frameGenerationChanged, this, &QmlBackend::applyFrameGenerationSetting);
+    QTimer::singleShot(0, this, &QmlBackend::startFrameGenerationProbe);
     connect(settings_qml, &QmlSettings::streamMenuEnabledChanged, this, &QmlBackend::updateStreamShortcut);
     connect(settings_qml, &QmlSettings::streamMenuShortcut1Changed, this, &QmlBackend::updateStreamShortcut);
     connect(settings_qml, &QmlSettings::streamMenuShortcut2Changed, this, &QmlBackend::updateStreamShortcut);
@@ -507,6 +509,9 @@ bool QmlBackend::prepareFrameForPresentation(ChiakiFfmpegFrame &frame, bool use_
 QmlBackend::~QmlBackend()
 {
     teardownSession();
+    stopFrameGenerator();
+    fg_probe_future.waitForFinished();
+    av_buffer_unref(&fg_cuda_device);
 #ifdef CHIAKI_HAVE_WEBENGINE
     if(request_interceptor)
         request_interceptor->deleteLater();
@@ -541,9 +546,100 @@ void QmlBackend::teardownSession()
         QMetaObject::invokeMethod(frame_ctx, []() {}, Qt::BlockingQueuedConnection);
     }
 
-    // 3) Safe now: schedule the deferred delete and drop the member.
+    // 3) No more decoded frames can reach the generator; flush and stop it.
+    stopFrameGenerator();
+
+    // 4) Safe now: schedule the deferred delete and drop the member.
     session->deleteLater();
     session = nullptr;
+}
+
+void QmlBackend::stopFrameGenerator()
+{
+    frame_generator_active.storeRelease(0);
+    if (!frame_generator)
+        return;
+    frame_generator->stop();
+    delete frame_generator;
+    frame_generator = nullptr;
+}
+
+void QmlBackend::startFrameGenerationProbe()
+{
+    if (fg_probe_future.isStarted())
+        return;
+    framegen::ProbeInput input;
+    input.vulkan_renderer = window && window->runtimeRendererBackend() == static_cast<int>(RenderBackend::Vulkan);
+    input.vulkan_device = input.vulkan_renderer ? window->vulkanHwDeviceCtx() : nullptr;
+    input.vulkan_device_extensions = window ? window->vulkanDeviceExtensions() : QStringList();
+    input.cuda_decoder_available = settings_qml->availableDecoders().contains(QStringLiteral("cuda"));
+    settings_qml->setFrameGenerationCapabilities({}, true, tr("Checking GPU…"), QString(), QString());
+    fg_probe_future = QtConcurrent::run([this, input]() {
+        AVBufferRef *cuda = nullptr;
+        framegen::Capabilities caps = framegen::probeCapabilities(input, &cuda);
+        {
+            QMutexLocker locker(&fg_caps_mutex);
+            fg_caps = caps;
+            av_buffer_unref(&fg_cuda_device);
+            fg_cuda_device = cuda;
+        }
+        QMetaObject::invokeMethod(this, &QmlBackend::publishFrameGenerationCapabilities, Qt::QueuedConnection);
+    });
+}
+
+void QmlBackend::publishFrameGenerationCapabilities()
+{
+    framegen::Capabilities caps;
+    {
+        QMutexLocker locker(&fg_caps_mutex);
+        caps = fg_caps;
+    }
+    settings_qml->setFrameGenerationCapabilities(caps.toVariantList(), false, caps.summary, caps.nvfruc, caps.self_test_report);
+    if (!frame_generator) {
+        QString reason;
+        const int requested = settings->GetFrameGenerationMultiplier();
+        const int effective = resolveFrameGenerationMultiplier(requested, &reason);
+        settings_qml->setFrameGenerationEffective(effective > 1 ? tr("x%1 will be used in the next session").arg(effective)
+                                                  : (requested > 1 ? tr("Off (x%1 unavailable: %2)").arg(requested).arg(reason) : tr("Off")));
+    }
+}
+
+int QmlBackend::resolveFrameGenerationMultiplier(int requested, QString *reason)
+{
+    if (requested <= 1)
+        return 1;
+    QMutexLocker locker(&fg_caps_mutex);
+    if (!fg_caps.probed) {
+        if (reason)
+            *reason = tr("GPU capabilities not checked yet");
+        return 1;
+    }
+    const framegen::ModeAvailability &mode = fg_caps.modes[qBound(2, requested, framegen::kMaxMultiplier)];
+    if (!mode.enabled || !fg_cuda_device) {
+        if (reason)
+            *reason = mode.reason;
+        return 1;
+    }
+    return requested;
+}
+
+void QmlBackend::applyFrameGenerationSetting()
+{
+    const int requested = settings->GetFrameGenerationMultiplier();
+    QString reason;
+    const int effective = resolveFrameGenerationMultiplier(requested, &reason);
+    if (frame_generator) {
+        // The session decodes with NVDEC: switching between off/x2/x3/x4 works live.
+        frame_generator->setMultiplier(effective);
+        window->setStreamMaxFPS(static_cast<unsigned int>(qRound(fg_session_fps * effective)));
+        if (effective <= 1)
+            settings_qml->setFrameGenerationEffective(requested > 1 ? tr("Off (x%1 unavailable: %2)").arg(requested).arg(reason) : tr("Off"));
+        return;
+    }
+    if (session && effective > 1)
+        settings_qml->setFrameGenerationEffective(tr("x%1 applies from the next session").arg(effective));
+    else if (!session)
+        publishFrameGenerationCapabilities();
 }
 
 QmlMainWindow *QmlBackend::qmlWindow() const
@@ -1113,11 +1209,77 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
             qCInfo(chiakiGui) << "Falling back to software decoder";
     }
 
+    // Frame generation needs NVDEC (CUDA) frames on the renderer's GPU; it overrides the decoder
+    // choice. When it is off or unavailable the normal decoder selection above is kept.
+    int fg_multiplier = 1;
+    const int fg_requested = settings->GetFrameGenerationMultiplier();
+    if (fg_requested > 1) {
+        if (!fg_probe_future.isStarted())
+            startFrameGenerationProbe();
+        fg_probe_future.waitForFinished();
+        QString reason;
+        fg_multiplier = resolveFrameGenerationMultiplier(fg_requested, &reason);
+        if (fg_multiplier > 1) {
+            qCInfo(chiakiGui) << "Frame generation x" << fg_multiplier << ": decoding with cuda (was" << session_info.hw_decoder << ")";
+            session_info.hw_decoder = "cuda";
+            QMutexLocker locker(&fg_caps_mutex);
+            session_info.hw_device_ctx = fg_cuda_device;
+        } else {
+            qCInfo(chiakiGui) << "Frame generation x" << fg_requested << "unavailable, using normal playback:" << reason;
+            settings_qml->setFrameGenerationEffective(tr("Off (x%1 unavailable: %2)").arg(fg_requested).arg(reason));
+        }
+    } else {
+        settings_qml->setFrameGenerationEffective(tr("Off"));
+    }
+
     try {
         session = new StreamSession(session_info, this);
     } catch (const Exception &e) {
         emit error(tr("Stream failed"), tr("Failed to initialize Stream Session: %1").arg(e.what()));
         return;
+    }
+
+    stopFrameGenerator();
+    fg_session_fps = connect_info.video_profile.max_fps > 0 ? connect_info.video_profile.max_fps : 60.0;
+    if (fg_multiplier > 1) {
+        frame_generator = new framegen::FrameGenerator();
+        framegen::FrameGenerator::Config fg_config;
+        fg_config.multiplier = fg_multiplier;
+        fg_config.source_fps = fg_session_fps;
+        fg_config.display_hz = window->displayRefreshRate();
+        {
+            QMutexLocker locker(&fg_caps_mutex);
+            fg_config.cuda_device = fg_cuda_device;
+        }
+        fg_config.vulkan_device = window->vulkanHwDeviceCtx();
+        QmlMainWindow *target_window = window;
+        fg_config.deliver = [this, target_window](ChiakiFfmpegFrame frame, int32_t frames_lost) {
+            if (!prepareFrameForPresentation(frame, false)) {
+                av_frame_free(&frame.frame);
+                return;
+            }
+            const qint64 delivery_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            QMetaObject::invokeMethod(target_window, [target_window, frame, frames_lost, delivery_us]() mutable {
+                target_window->presentFrame(frame, frames_lost, delivery_us);
+            });
+        };
+        fg_config.renderer_backlogged = [target_window]() { return target_window->frameQueueBacklogged(); };
+        fg_config.status_changed = [this](const QString &status) {
+            QMetaObject::invokeMethod(this, [this, status]() { settings_qml->setFrameGenerationEffective(status); });
+        };
+        QString fg_error;
+        if (frame_generator->start(fg_config, &fg_error)) {
+            window->setStreamMaxFPS(static_cast<unsigned int>(qRound(fg_session_fps * fg_multiplier)));
+            frame_generator_active.storeRelease(1);
+            if (fg_config.display_hz > 1.0 && fg_session_fps * fg_multiplier > fg_config.display_hz * 1.02)
+                qCWarning(chiakiGui) << "Display refresh" << fg_config.display_hz << "Hz is below the generated rate"
+                                     << fg_session_fps * fg_multiplier << "FPS; generated frames that cannot be shown will be dropped";
+        } else {
+            qCWarning(chiakiGui) << "Frame generation failed to start:" << fg_error;
+            settings_qml->setFrameGenerationEffective(tr("Off (failed to start: %1)").arg(fg_error));
+            delete frame_generator;
+            frame_generator = nullptr;
+        }
     }
 
     connect(session, &StreamSession::FfmpegFrameAvailable, frame_thread->parent(), [this, use_opengl_renderer]() {
@@ -1134,6 +1296,15 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         logDecoderFramePtsStats(static_cast<qint64>(chiaki_time_now_monotonic_us()), frame.pts, frame.duration);
         if (frame.recovered)
             pending_recovered_frame.storeRelaxed(1);
+
+        if (frame_generator_active.loadAcquire() != 0 && frame_generator) {
+            // Interpolation runs after decoding and before presentation; the generator
+            // delivers originals and generated frames to presentFrame at their release times.
+            if (pending_recovered_frame.fetchAndStoreRelaxed(0) != 0)
+                frame.recovered = true;
+            frame_generator->submit(frame, frames_lost);
+            return;
+        }
 
         const qint64 prepare_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         if (!prepareFrameForPresentation(frame, use_opengl_renderer))

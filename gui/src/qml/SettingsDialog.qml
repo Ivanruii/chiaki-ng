@@ -994,6 +994,120 @@ DialogView {
                     }
 
                     Label {
+                        Layout.alignment: Qt.AlignRight | Qt.AlignTop
+                        Layout.topMargin: 12
+                        text: qsTr("Frame Generation:")
+                    }
+
+                    ColumnLayout {
+                        id: frameGeneration
+                        Layout.preferredWidth: 520
+                        spacing: 2
+                        readonly property var labels: [qsTr("Off"), qsTr("x2"), qsTr("x3"), qsTr("x4")]
+                        readonly property var modes: Chiaki.settings.frameGenerationModes
+                        readonly property int sourceFps: Chiaki.settings.frameGenerationSourceFps
+
+                        function modeEnabled(index) {
+                            if (index === 0)
+                                return true;
+                            return modes.length > index && modes[index].enabled;
+                        }
+                        function modeReason(index) {
+                            if (index === 0)
+                                return "";
+                            if (Chiaki.settings.frameGenerationProbing)
+                                return qsTr("checking GPU…");
+                            return modes.length > index ? modes[index].reason : "";
+                        }
+                        function targetText(index) {
+                            return index === 0 ? qsTr("%1 FPS (no generated frames)").arg(sourceFps)
+                                               : qsTr("%1 → %2 FPS").arg(sourceFps).arg(sourceFps * (index + 1));
+                        }
+
+                        C.Slider {
+                            id: frameGenerationSlider
+                            Layout.fillWidth: true
+                            from: 0
+                            to: 3
+                            stepSize: 1
+                            snapMode: Slider.SnapAlways
+                            value: Chiaki.settings.frameGeneration
+                            onMoved: {
+                                const index = Math.round(value);
+                                if (!frameGeneration.modeEnabled(index)) {
+                                    // keep the saved, supported position; the reason is listed below
+                                    value = Qt.binding(() => Chiaki.settings.frameGeneration);
+                                    return;
+                                }
+                                Chiaki.settings.frameGeneration = index;
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Repeater {
+                                model: 4
+                                Label {
+                                    required property int index
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: index === 0 ? Text.AlignLeft : (index === 3 ? Text.AlignRight : Text.AlignHCenter)
+                                    text: frameGeneration.labels[index]
+                                    font.bold: index === Chiaki.settings.frameGeneration
+                                    opacity: frameGeneration.modeEnabled(index) ? 1.0 : 0.4
+                                }
+                            }
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            text: qsTr("Target: %1").arg(frameGeneration.targetText(Chiaki.settings.frameGeneration))
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            visible: text.length > 0
+                            text: Chiaki.settings.frameGenerationEffective.length > 0
+                                  ? qsTr("Effective mode: %1").arg(Chiaki.settings.frameGenerationEffective) : ""
+                        }
+
+                        Repeater {
+                            model: 3
+                            Label {
+                                required property int index
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                visible: !frameGeneration.modeEnabled(index + 1)
+                                opacity: 0.7
+                                text: qsTr("%1 unavailable: %2").arg(frameGeneration.labels[index + 1]).arg(frameGeneration.modeReason(index + 1))
+                            }
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            opacity: 0.7
+                            visible: text.length > 0
+                            text: Chiaki.settings.frameGenerationSummary
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            opacity: 0.7
+                            visible: text.length > 0
+                            text: Chiaki.settings.frameGenerationNvfruc
+                        }
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight | Qt.AlignTop
+                        Layout.topMargin: 12
+                        text: qsTr("(Off)")
+                    }
+
+                    Label {
                         Layout.alignment: Qt.AlignRight
                         text: qsTr("Renderer Backend:")
                     }

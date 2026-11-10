@@ -522,6 +522,10 @@ class Settings : public QObject
 		void SetDirectFrameMapping(bool enabled) { settings.setValue("settings/direct_frame_mapping", enabled); }
 		void SetPlaceboFrameMixer(PlaceboFrameMixer frame_mixer);
 
+		// Frame generation multiplier: 1 = off, 2..4 = x2..x4 (stored as "off"/"x2"/"x3"/"x4")
+		int GetFrameGenerationMultiplier() const;
+		void SetFrameGenerationMultiplier(int multiplier);
+
 		bool GetPlaceboDeinterlaceEnabled() const;
 		void SetPlaceboDeinterlaceEnabled(bool enabled);
 		PlaceboDeinterlacePreset GetPlaceboDeinterlacePreset() const;

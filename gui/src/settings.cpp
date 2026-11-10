@@ -183,7 +183,12 @@ static void MigrateLegacyFrameMixerSetting(QSettings *settings, QSettings *place
 		}
 	}
 
-	placebo_settings->remove("frame_mixer");
+	// The automatic startup migration keeps the legacy key: chiaki-ng releases before this
+	// migration share these settings (same QSettings location) and still read it, and
+	// re-migration is prevented by the frame_mixer_key check above. Explicit imports
+	// (allowOverwrite) consume it as before.
+	if (allowOverwrite)
+		placebo_settings->remove("frame_mixer");
 	placebo_settings->endGroup();
 }
 
@@ -1305,6 +1310,23 @@ PlaceboFrameMixer Settings::GetPlaceboFrameMixer() const
 void Settings::SetPlaceboFrameMixer(PlaceboFrameMixer frame_mixer)
 {
 	settings.setValue(frame_mixer_key, placebo_frame_mixer_values[frame_mixer]);
+}
+
+int Settings::GetFrameGenerationMultiplier() const
+{
+	const QString v = settings.value("settings/frame_generation", "off").toString().trimmed().toLower();
+	if (v == "x2")
+		return 2;
+	if (v == "x3")
+		return 3;
+	if (v == "x4")
+		return 4;
+	return 1;
+}
+
+void Settings::SetFrameGenerationMultiplier(int multiplier)
+{
+	settings.setValue("settings/frame_generation", multiplier >= 2 && multiplier <= 4 ? QStringLiteral("x%1").arg(multiplier) : QStringLiteral("off"));
 }
 
 bool Settings::GetPlaceboDeinterlaceEnabled() const
