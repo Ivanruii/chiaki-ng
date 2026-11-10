@@ -326,6 +326,7 @@ private:
     framegen::FrameGenerator *frame_generator = {};
     QAtomicInteger<int> frame_generator_active = 0;
     QFuture<void> fg_probe_future;
+    bool fg_probe_started = false; // a default QFuture already reports isStarted()
     QMutex fg_caps_mutex;
     framegen::Capabilities fg_caps;
     AVBufferRef *fg_cuda_device = {};

@@ -566,8 +566,9 @@ void QmlBackend::stopFrameGenerator()
 
 void QmlBackend::startFrameGenerationProbe()
 {
-    if (fg_probe_future.isStarted())
+    if (fg_probe_started)
         return;
+    fg_probe_started = true;
     framegen::ProbeInput input;
     input.vulkan_renderer = window && window->runtimeRendererBackend() == static_cast<int>(RenderBackend::Vulkan);
     input.vulkan_device = input.vulkan_renderer ? window->vulkanHwDeviceCtx() : nullptr;
@@ -1214,7 +1215,7 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
     int fg_multiplier = 1;
     const int fg_requested = settings->GetFrameGenerationMultiplier();
     if (fg_requested > 1) {
-        if (!fg_probe_future.isStarted())
+        if (!fg_probe_started)
             startFrameGenerationProbe();
         fg_probe_future.waitForFinished();
         QString reason;
