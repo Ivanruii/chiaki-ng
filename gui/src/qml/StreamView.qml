@@ -18,6 +18,7 @@ Item {
     readonly property bool useSeparateMenuWindow: Chiaki.window.runtimeRendererBackend === 1
     readonly property int streamMenuHeight: 200
     readonly property bool streamStatsVisible: Chiaki.settings.showStreamStats && Chiaki.session && !(menuController.open || menuController.closing) && !sessionLoading && !sessionError && !(Chiaki.settings.audioVideoDisabled & 0x02)
+    readonly property bool frameGenerationZonesVisible: Chiaki.settings.frameGenerationShowZones && Chiaki.session && !(menuController.open || menuController.closing) && !sessionLoading && !sessionError && !(Chiaki.settings.audioVideoDisabled & 0x02)
     property int separateMenuX: 0
     property int separateMenuY: 0
     property int separateMenuWidth: 0
@@ -90,10 +91,19 @@ Item {
         updateSeparateMenuGeometry();
         updateOverlayInteractionActive();
         Chiaki.window.setStatsOverlayActive(streamStatsVisible);
+        Chiaki.window.setZonesOverlayActive(frameGenerationZonesVisible);
     }
     onStreamStatsVisibleChanged: {
         if (Chiaki.window)
             Chiaki.window.setStatsOverlayActive(streamStatsVisible);
+    }
+    onFrameGenerationZonesVisibleChanged: {
+        if (Chiaki.window)
+            Chiaki.window.setZonesOverlayActive(frameGenerationZonesVisible);
+    }
+    Component.onDestruction: {
+        if (Chiaki.window)
+            Chiaki.window.setZonesOverlayActive(false);
     }
     onWidthChanged: updateSeparateMenuGeometry()
     onHeightChanged: updateSeparateMenuGeometry()

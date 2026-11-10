@@ -50,6 +50,7 @@ class QVBoxLayout;
 class QHBoxLayout;
 class QFrame;
 class StatsOverlayWidget;
+class ZoneOverlayWidget;
 class BufferedPlaybackPacerThread;
 class DeferredPresentPacerThread;
 class DeferredSwapThread;
@@ -162,6 +163,9 @@ public:
     Q_INVOKABLE void requestOverlayUpdate();
     Q_INVOKABLE void setOverlayInteractionActive(bool active);
     Q_INVOKABLE void setStatsOverlayActive(bool active);
+    // Outlines of the frame generation protected zones while streaming (when enabled in settings)
+    Q_INVOKABLE void setZonesOverlayActive(bool active);
+    void updateZonesOverlay();
     Q_INVOKABLE void noteLoadingTransitionComplete();
     Q_INVOKABLE void presentStartupWarmupFrame(unsigned width, unsigned height, bool hdr);
     void armVerbosePlaceboQuietWindow();
@@ -419,6 +423,8 @@ private:
     QAtomicInteger<int> startup_video_visible_refresh_pending = 0;
     QAtomicInteger<int> stats_overlay_active = 0;
     StatsOverlayWidget *stats_overlay_widget = nullptr;
+    ZoneOverlayWidget *zones_overlay_widget = nullptr;
+    bool zones_overlay_requested = false;
     bool stats_overlay_visible = false;
     QAtomicInteger<quint64> startup_video_visible_generation = 0;
     bool startup_warmup_frame_active = false;

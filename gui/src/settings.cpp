@@ -1329,6 +1329,31 @@ void Settings::SetFrameGenerationMultiplier(int multiplier)
 	settings.setValue("settings/frame_generation", multiplier >= 2 && multiplier <= 4 ? QStringLiteral("x%1").arg(multiplier) : QStringLiteral("off"));
 }
 
+QList<QRectF> Settings::GetFrameGenerationZones() const
+{
+	// "x,y,w,h;x,y,w,h" with normalized values
+	QList<QRectF> zones;
+	const QString value = settings.value("settings/frame_generation_zones").toString();
+	for (const QString &item : value.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
+		const QStringList parts = item.split(QLatin1Char(','));
+		if (parts.size() != 4)
+			continue;
+		bool ok[4] = {};
+		const QRectF r(parts[0].toDouble(&ok[0]), parts[1].toDouble(&ok[1]), parts[2].toDouble(&ok[2]), parts[3].toDouble(&ok[3]));
+		if (ok[0] && ok[1] && ok[2] && ok[3] && r.width() > 0.0 && r.height() > 0.0)
+			zones.append(r);
+	}
+	return zones;
+}
+
+void Settings::SetFrameGenerationZones(const QList<QRectF> &zones)
+{
+	QStringList items;
+	for (const QRectF &r : zones)
+		items << QStringLiteral("%1,%2,%3,%4").arg(r.x(), 0, 'f', 4).arg(r.y(), 0, 'f', 4).arg(r.width(), 0, 'f', 4).arg(r.height(), 0, 'f', 4);
+	settings.setValue("settings/frame_generation_zones", items.join(QLatin1Char(';')));
+}
+
 bool Settings::GetPlaceboDeinterlaceEnabled() const
 {
 	QString value = placebo_settings.value("placebo_settings/deinterlace", "no").toString().toLower();

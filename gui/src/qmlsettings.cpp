@@ -1,3 +1,4 @@
+#include <QVariantMap>
 #include "qmlsettings.h"
 #include "sessionlog.h"
 
@@ -1018,6 +1019,71 @@ void QmlSettings::setFrameGenerationCapabilities(const QVariantList &modes, bool
     fg_nvfruc = nvfruc;
     fg_self_test = self_test;
     emit frameGenerationCapabilitiesChanged();
+}
+
+QVariantList QmlSettings::frameGenerationZones() const
+{
+    QVariantList list;
+    for (const QRectF &r : settings->GetFrameGenerationZones()) {
+        QVariantMap zone;
+        zone[QStringLiteral("x")] = r.x() * 100.0;
+        zone[QStringLiteral("y")] = r.y() * 100.0;
+        zone[QStringLiteral("w")] = r.width() * 100.0;
+        zone[QStringLiteral("h")] = r.height() * 100.0;
+        list << zone;
+    }
+    return list;
+}
+
+void QmlSettings::addFrameGenerationZone()
+{
+    QList<QRectF> zones = settings->GetFrameGenerationZones();
+    if (zones.size() >= 16)
+        return;
+    // a starting point the user then moves over the HUD element
+    zones.append(QRectF(0.02, 0.80, 0.20, 0.16));
+    settings->SetFrameGenerationZones(zones);
+    emit frameGenerationZonesChanged();
+}
+
+void QmlSettings::removeFrameGenerationZone(int index)
+{
+    QList<QRectF> zones = settings->GetFrameGenerationZones();
+    if (index < 0 || index >= zones.size())
+        return;
+    zones.removeAt(index);
+    settings->SetFrameGenerationZones(zones);
+    emit frameGenerationZonesChanged();
+}
+
+void QmlSettings::setFrameGenerationZone(int index, double x, double y, double w, double h)
+{
+    QList<QRectF> zones = settings->GetFrameGenerationZones();
+    if (index < 0 || index >= zones.size())
+        return;
+    x = qBound(0.0, x, 100.0);
+    y = qBound(0.0, y, 100.0);
+    w = qBound(0.5, w, 100.0 - x);
+    h = qBound(0.5, h, 100.0 - y);
+    const QRectF r(x / 100.0, y / 100.0, w / 100.0, h / 100.0);
+    if (zones[index] == r)
+        return;
+    zones[index] = r;
+    settings->SetFrameGenerationZones(zones);
+    emit frameGenerationZonesChanged();
+}
+
+bool QmlSettings::frameGenerationShowZones() const
+{
+    return settings->GetFrameGenerationShowZones();
+}
+
+void QmlSettings::setFrameGenerationShowZones(bool show)
+{
+    if (show == settings->GetFrameGenerationShowZones())
+        return;
+    settings->SetFrameGenerationShowZones(show);
+    emit frameGenerationZonesChanged();
 }
 
 void QmlSettings::setFrameGenerationEffective(const QString &effective)

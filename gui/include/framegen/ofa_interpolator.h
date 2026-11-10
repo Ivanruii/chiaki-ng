@@ -14,6 +14,7 @@
 #include "framegen/cuda_dyn.h"
 
 #include <string>
+#include <vector>
 
 namespace framegen {
 
@@ -30,6 +31,14 @@ struct GpuFrame
 	CUdeviceptr chroma = 0;
 	size_t chroma_pitch = 0;
 };
+
+// Rectangle in normalized video coordinates (0..1, origin top-left).
+struct ProtectedZone
+{
+	float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+};
+
+constexpr int kMaxProtectedZones = 16;
 
 struct PairAnalysis
 {
@@ -86,6 +95,10 @@ public:
 	bool synthesize(float t, const GpuFrame &dst, std::string *error);
 
 	bool synchronize(std::string *error);
+
+	// Areas (e.g. a game HUD) where generated frames show the temporally nearest original
+	// instead of motion-compensated pixels. Up to kMaxProtectedZones; empty disables.
+	bool setProtectedZones(const std::vector<ProtectedZone> &zones, std::string *error);
 
 	// Synthetic-motion self test: renders frames at 1/4..3/4 of a known motion and checks
 	// that they match the ground truth far better than repeating or blending the originals.

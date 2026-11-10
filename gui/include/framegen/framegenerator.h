@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 extern "C" {
 #include <libavutil/buffer.h>
@@ -39,6 +40,7 @@ extern "C" {
 namespace framegen {
 
 class OfaInterpolator;
+struct ProtectedZone;
 
 constexpr int kMaxMultiplier = 4;
 
@@ -100,6 +102,7 @@ public:
 		double display_hz = 0.0;              // 0 = unknown
 		AVBufferRef *cuda_device = nullptr;   // from probeCapabilities()
 		AVBufferRef *vulkan_device = nullptr; // FFmpeg Vulkan device of the renderer
+		std::vector<float> protected_zones;   // x, y, w, h (normalized) per zone
 		DeliverFn deliver;                    // called from the generator thread
 		BacklogFn renderer_backlogged;        // true while the renderer has frames waiting
 		StatusFn status_changed;              // called from the generator thread
@@ -116,6 +119,10 @@ public:
 
 	// Takes ownership of frame.frame. Thread-safe; called from the decoder frame thread.
 	void submit(ChiakiFfmpegFrame frame, int32_t frames_lost);
+
+	// Protected zones in normalized video coordinates (x, y, w, h in 0..1): generated frames
+	// show the temporally nearest original there. Takes effect on the next pair.
+	void setProtectedZones(const std::vector<float> &xywh);
 
 	// 1 = pass-through. Takes effect on the next original and resets the interpolator.
 	void setMultiplier(int multiplier);
@@ -159,6 +166,8 @@ private:
 	std::deque<Output> outputs;
 	std::atomic<int> requested_multiplier{1};
 	std::atomic<int> effective_multiplier{1};
+	std::vector<float> zones_xywh; // guarded by mutex
+	bool zones_dirty = false;       // guarded by mutex
 	int active_multiplier = 1;
 
 	// worker-thread state

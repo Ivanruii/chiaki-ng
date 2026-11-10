@@ -8,6 +8,7 @@
 #include "host.h"
 
 #include <QSettings>
+#include <QRectF>
 #include <QList>
 #include <QMap>
 #include <QRect>
@@ -525,6 +526,11 @@ class Settings : public QObject
 		// Frame generation multiplier: 1 = off, 2..4 = x2..x4 (stored as "off"/"x2"/"x3"/"x4")
 		int GetFrameGenerationMultiplier() const;
 		void SetFrameGenerationMultiplier(int multiplier);
+		// Protected zones (e.g. game HUD) in normalized video coordinates (0..1)
+		QList<QRectF> GetFrameGenerationZones() const;
+		void SetFrameGenerationZones(const QList<QRectF> &zones);
+		bool GetFrameGenerationShowZones() const { return settings.value("settings/frame_generation_show_zones", false).toBool(); }
+		void SetFrameGenerationShowZones(bool show) { settings.setValue("settings/frame_generation_show_zones", show); }
 
 		bool GetPlaceboDeinterlaceEnabled() const;
 		void SetPlaceboDeinterlaceEnabled(bool enabled);

@@ -324,6 +324,15 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
             &QmlMainWindow::updateVulkanDeferredSwap,
             Qt::QueuedConnection);
     connect(settings_qml, &QmlSettings::frameGenerationChanged, this, &QmlBackend::applyFrameGenerationSetting);
+    connect(settings_qml, &QmlSettings::frameGenerationZonesChanged, this, [this]() {
+        if (frame_generator) {
+            std::vector<float> zones;
+            for (const QRectF &r : this->settings->GetFrameGenerationZones())
+                zones.insert(zones.end(), { static_cast<float>(r.x()), static_cast<float>(r.y()), static_cast<float>(r.width()), static_cast<float>(r.height()) });
+            frame_generator->setProtectedZones(zones);
+        }
+        this->window->updateZonesOverlay();
+    });
     QTimer::singleShot(0, this, &QmlBackend::startFrameGenerationProbe);
     connect(settings_qml, &QmlSettings::streamMenuEnabledChanged, this, &QmlBackend::updateStreamShortcut);
     connect(settings_qml, &QmlSettings::streamMenuShortcut1Changed, this, &QmlBackend::updateStreamShortcut);
@@ -1253,6 +1262,9 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
             fg_config.cuda_device = fg_cuda_device;
         }
         fg_config.vulkan_device = window->vulkanHwDeviceCtx();
+        for (const QRectF &r : settings->GetFrameGenerationZones())
+            fg_config.protected_zones.insert(fg_config.protected_zones.end(),
+                { static_cast<float>(r.x()), static_cast<float>(r.y()), static_cast<float>(r.width()), static_cast<float>(r.height()) });
         QmlMainWindow *target_window = window;
         fg_config.deliver = [this, target_window](ChiakiFfmpegFrame frame, int32_t frames_lost) {
             if (!prepareFrameForPresentation(frame, false)) {

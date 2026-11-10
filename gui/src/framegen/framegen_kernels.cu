@@ -128,6 +128,19 @@ __device__ __forceinline__ void fg_weights(float t, float v0, float v1, float &w
 	w1 /= s;
 }
 
+// Protected zones (x0, y0, x1, y1 in luma pixels): areas such as a game HUD where the
+// generated frame shows the temporally nearest original instead of motion-compensated
+// pixels, so static overlays never pick up the motion of what is behind them.
+__device__ __forceinline__ bool fg_in_zone(const float4 *zones, int nzones, float x, float y)
+{
+	for (int i = 0; i < nzones; i++) {
+		const float4 z = zones[i];
+		if (x >= z.x && x < z.z && y >= z.y && y < z.w)
+			return true;
+	}
+	return false;
+}
+
 template<typename T>
 __device__ __forceinline__ T fg_store(float v, float maxv)
 {
@@ -220,7 +233,7 @@ __global__ void fg_consistency(const FgFlow *f01, const FgFlow *f10, int bw, int
 __global__ void NAME(const unsigned char *y0p, unsigned int y0_pitch, const unsigned char *y1p, unsigned int y1_pitch, \
                      unsigned char *dst, unsigned int dst_pitch, int w, int h, \
                      const FgFlow *f01, const FgFlow *f10, const float *vis0, const float *vis1, \
-                     int bw, int bh, float grid, float t) \
+                     int bw, int bh, float grid, float t, const float4 *zones, int nzones) \
 { \
 	const int x = blockIdx.x * blockDim.x + threadIdx.x; \
 	const int y = blockIdx.y * blockDim.y + threadIdx.y; \
@@ -228,6 +241,11 @@ __global__ void NAME(const unsigned char *y0p, unsigned int y0_pitch, const unsi
 		return; \
 	const float cx = (float)x + 0.5f; \
 	const float cy = (float)y + 0.5f; \
+	if (nzones > 0 && fg_in_zone(zones, nzones, cx, cy)) { \
+		const unsigned char *src = t < 0.5f ? y0p + (size_t)y * y0_pitch : y1p + (size_t)y * y1_pitch; \
+		reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = reinterpret_cast<const T *>(src)[x]; \
+		return; \
+	} \
 	float px, py, qx, qy; \
 	fg_trace(f01, bw, bh, grid, t, cx, cy, px, py); \
 	fg_trace(f10, bw, bh, grid, 1.0f - t, cx, cy, qx, qy); \
@@ -244,7 +262,7 @@ __global__ void NAME(const unsigned char *y0p, unsigned int y0_pitch, const unsi
 __global__ void NAME(const unsigned char *uv0p, unsigned int uv0_pitch, const unsigned char *uv1p, unsigned int uv1_pitch, \
                      unsigned char *dst, unsigned int dst_pitch, int cw, int ch, \
                      const FgFlow *f01, const FgFlow *f10, const float *vis0, const float *vis1, \
-                     int bw, int bh, float grid, float t) \
+                     int bw, int bh, float grid, float t, const float4 *zones, int nzones) \
 { \
 	const int x = blockIdx.x * blockDim.x + threadIdx.x; \
 	const int y = blockIdx.y * blockDim.y + threadIdx.y; \
@@ -253,6 +271,13 @@ __global__ void NAME(const unsigned char *uv0p, unsigned int uv0_pitch, const un
 	/* chroma sample centre in luma coordinates */ \
 	const float lx = ((float)x + 0.5f) * 2.0f; \
 	const float ly = ((float)y + 0.5f) * 2.0f; \
+	if (nzones > 0 && fg_in_zone(zones, nzones, lx, ly)) { \
+		const unsigned char *src = t < 0.5f ? uv0p + (size_t)y * uv0_pitch : uv1p + (size_t)y * uv1_pitch; \
+		T *drow = reinterpret_cast<T *>(dst + (size_t)y * dst_pitch); \
+		drow[2 * x] = reinterpret_cast<const T *>(src)[2 * x]; \
+		drow[2 * x + 1] = reinterpret_cast<const T *>(src)[2 * x + 1]; \
+		return; \
+	} \
 	float px, py, qx, qy; \
 	fg_trace(f01, bw, bh, grid, t, lx, ly, px, py); \
 	fg_trace(f10, bw, bh, grid, 1.0f - t, lx, ly, qx, qy); \

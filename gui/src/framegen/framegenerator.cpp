@@ -213,6 +213,11 @@ bool FrameGenerator::start(const Config &config, QString *error)
 	cfg.multiplier = std::clamp(config.multiplier, 1, kMaxMultiplier);
 	cfg.source_fps = config.source_fps > 1.0 ? config.source_fps : 60.0;
 	requested_multiplier.store(cfg.multiplier);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		zones_xywh = cfg.protected_zones;
+		zones_dirty = true;
+	}
 	active_multiplier = cfg.multiplier;
 	effective_multiplier.store(cfg.multiplier);
 	stopping = false;
@@ -278,6 +283,13 @@ void FrameGenerator::submit(ChiakiFfmpegFrame frame, int32_t frames_lost)
 		inputs.push_back({ frame, frames_lost, nowUs() });
 	}
 	cond.notify_one();
+}
+
+void FrameGenerator::setProtectedZones(const std::vector<float> &xywh)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	zones_xywh = xywh;
+	zones_dirty = true;
 }
 
 void FrameGenerator::setMultiplier(int multiplier)
@@ -434,6 +446,10 @@ bool FrameGenerator::ensureEngine(const AVFrame *src, QString *error)
 	frames_w = src->width;
 	frames_h = src->height;
 	frames_sw_format = sw_format;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		zones_dirty = true;
+	}
 	qCInfo(chiakiFrameGen) << "Interpolator ready for" << frames_w << "x" << frames_h
 	                       << av_get_pix_fmt_name(static_cast<AVPixelFormat>(sw_format))
 	                       << (interop_gpu ? "(GPU interop)" : "(CPU copy)");
@@ -512,6 +528,35 @@ void FrameGenerator::process(Input &in)
 	if (!have_prev || interval < nominal * 0.4 || interval > nominal * 2.5) {
 		discontinuity = true;
 		interval = nominal;
+	}
+
+	if (engine) {
+		std::vector<float> zones;
+		bool apply = false;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (zones_dirty) {
+				zones = zones_xywh;
+				zones_dirty = false;
+				apply = true;
+			}
+		}
+		if (apply) {
+			std::vector<ProtectedZone> list;
+			for (size_t i = 0; i + 3 < zones.size(); i += 4) {
+				ProtectedZone z;
+				z.x0 = zones[i];
+				z.y0 = zones[i + 1];
+				z.x1 = zones[i] + zones[i + 2];
+				z.y1 = zones[i + 1] + zones[i + 3];
+				list.push_back(z);
+			}
+			std::string zone_error;
+			if (!engine->setProtectedZones(list, &zone_error))
+				qCWarning(chiakiFrameGen) << "Could not apply protected zones:" << QString::fromStdString(zone_error);
+			else
+				qCInfo(chiakiFrameGen) << "Protected zones:" << list.size();
+		}
 	}
 
 	PairAnalysis pair;

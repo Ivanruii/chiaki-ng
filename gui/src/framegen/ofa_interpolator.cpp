@@ -117,6 +117,8 @@ struct OfaInterpolator::Impl
 	size_t hist_luma_pitch[2] = {}, hist_chroma_pitch[2] = {};
 
 	CUdeviceptr raw01 = 0, raw10 = 0, f01 = 0, f10 = 0, vis0 = 0, vis1 = 0, counters = 0;
+	CUdeviceptr zones = 0;
+	int nzones = 0;
 	CUevent ev_begin = nullptr, ev_end = nullptr;
 
 	int grid = 4;
@@ -382,7 +384,8 @@ bool OfaInterpolator::init(CUcontext context, int width, int height, PixelLayout
 			return fail(cuError("cuMemAlloc", r));
 	if ((r = cu->cuMemAlloc(&d->vis0, vis_bytes)) != CHIAKI_CUDA_SUCCESS
 	    || (r = cu->cuMemAlloc(&d->vis1, vis_bytes)) != CHIAKI_CUDA_SUCCESS
-	    || (r = cu->cuMemAlloc(&d->counters, 4 * sizeof(uint32_t))) != CHIAKI_CUDA_SUCCESS)
+	    || (r = cu->cuMemAlloc(&d->counters, 4 * sizeof(uint32_t))) != CHIAKI_CUDA_SUCCESS
+	    || (r = cu->cuMemAlloc(&d->zones, kMaxProtectedZones * 4 * sizeof(float))) != CHIAKI_CUDA_SUCCESS)
 		return fail(cuError("cuMemAlloc", r));
 	cu->cuEventCreate(&d->ev_begin, CHIAKI_CU_EVENT_DEFAULT);
 	cu->cuEventCreate(&d->ev_end, CHIAKI_CU_EVENT_DEFAULT);
@@ -418,7 +421,7 @@ void OfaInterpolator::destroy()
 		if (d->hist_chroma[i])
 			cu->cuMemFree(d->hist_chroma[i]);
 	}
-	CUdeviceptr bufs[] = { d->raw01, d->raw10, d->f01, d->f10, d->vis0, d->vis1, d->counters };
+	CUdeviceptr bufs[] = { d->raw01, d->raw10, d->f01, d->f10, d->vis0, d->vis1, d->counters, d->zones };
 	for (CUdeviceptr p : bufs)
 		if (p)
 			cu->cuMemFree(p);
@@ -600,7 +603,9 @@ bool OfaInterpolator::synthesize(float t, const GpuFrame &dst, std::string *erro
 	unsigned int y1p = static_cast<unsigned int>(d->hist_luma_pitch[i1]);
 	unsigned int ydp = static_cast<unsigned int>(dst.luma_pitch);
 	int ww = w, hh = h;
-	void *largs[] = { &y0, &y0p, &y1, &y1p, &yd, &ydp, &ww, &hh, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t };
+	CUdeviceptr zones = d->zones;
+	int nzones = d->nzones;
+	void *largs[] = { &y0, &y0p, &y1, &y1p, &yd, &ydp, &ww, &hh, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &zones, &nzones };
 	CUresult r = cu->cuLaunchKernel(hi ? d->k_luma16 : d->k_luma8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, largs, nullptr);
 	if (r == CHIAKI_CUDA_SUCCESS) {
 		CUdeviceptr c0 = d->hist_chroma[i0], c1 = d->hist_chroma[i1], cd = dst.chroma;
@@ -608,7 +613,7 @@ bool OfaInterpolator::synthesize(float t, const GpuFrame &dst, std::string *erro
 		unsigned int c1p = static_cast<unsigned int>(d->hist_chroma_pitch[i1]);
 		unsigned int cdp = static_cast<unsigned int>(dst.chroma_pitch);
 		int cw = w / 2, ch = h / 2;
-		void *cargs[] = { &c0, &c0p, &c1, &c1p, &cd, &cdp, &cw, &ch, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t };
+		void *cargs[] = { &c0, &c0p, &c1, &c1p, &cd, &cdp, &cw, &ch, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &zones, &nzones };
 		r = cu->cuLaunchKernel(hi ? d->k_chroma16 : d->k_chroma8, divUp(cw, 32), divUp(ch, 8), 1, 32, 8, 1, 0, cu_stream, cargs, nullptr);
 	}
 	if (r != CHIAKI_CUDA_SUCCESS) {
@@ -616,6 +621,39 @@ bool OfaInterpolator::synthesize(float t, const GpuFrame &dst, std::string *erro
 			*error = cuError("Frame synthesis kernel", r);
 		return false;
 	}
+	return true;
+}
+
+bool OfaInterpolator::setProtectedZones(const std::vector<ProtectedZone> &zones, std::string *error)
+{
+	if (!initialized())
+		return false;
+	float data[kMaxProtectedZones * 4] = {};
+	int n = 0;
+	for (const ProtectedZone &z : zones) {
+		if (n >= kMaxProtectedZones)
+			break;
+		const float x0 = std::clamp(std::min(z.x0, z.x1), 0.0f, 1.0f) * w;
+		const float x1 = std::clamp(std::max(z.x0, z.x1), 0.0f, 1.0f) * w;
+		const float y0 = std::clamp(std::min(z.y0, z.y1), 0.0f, 1.0f) * h;
+		const float y1 = std::clamp(std::max(z.y0, z.y1), 0.0f, 1.0f) * h;
+		if (x1 - x0 < 1.0f || y1 - y0 < 1.0f)
+			continue;
+		data[4 * n + 0] = x0;
+		data[4 * n + 1] = y0;
+		data[4 * n + 2] = x1;
+		data[4 * n + 3] = y1;
+		n++;
+	}
+	CudaContextScope scope(ctx);
+	// cuMemcpyHtoD is synchronous with respect to the blocking stream used for synthesis
+	CUresult r = n > 0 ? d->cu->cuMemcpyHtoD(d->zones, data, sizeof(float) * 4 * n) : CHIAKI_CUDA_SUCCESS;
+	if (r != CHIAKI_CUDA_SUCCESS) {
+		if (error)
+			*error = cuError("Uploading protected zones", r);
+		return false;
+	}
+	d->nzones = n;
 	return true;
 }
 
@@ -870,6 +908,53 @@ bool OfaInterpolator::selfTest(CUcontext ctx, std::string *report, int w, int h,
 			ok = false;
 			err = "generated frame does not match the expected motion";
 		}
+	}
+	// Protected zone: the left third must be the nearest original, pixel for pixel, while
+	// the rest stays motion compensated.
+	if (ok) {
+		std::vector<ProtectedZone> zones(1);
+		zones[0].x0 = 0.0f;
+		zones[0].y0 = 0.0f;
+		zones[0].x1 = 1.0f / 3.0f;
+		zones[0].y1 = 1.0f;
+		const int zx = w / 3;
+		for (float t : { 0.25f, 0.75f }) {
+			if (!ok)
+				break;
+			ok = ip.setProtectedZones(zones, &err) && ip.synthesize(t, out, &err) && download(res, res_c);
+			if (!ok)
+				break;
+			const std::vector<uint8_t> &nearest = t < 0.5f ? l0 : l1;
+			const std::vector<uint8_t> &nearest_c = t < 0.5f ? c0 : c1;
+			size_t mismatches = 0;
+			for (int y = 0; y < h; y++)
+				for (int x = 0; x < zx - 1; x++)
+					mismatches += res[static_cast<size_t>(y) * w + x] != nearest[static_cast<size_t>(y) * w + x];
+			for (int y = 0; y < h / 2; y++)
+				for (int x = 0; x < (zx - 2) / 2; x++)
+					for (int c = 0; c < 2; c++)
+						mismatches += res_c[static_cast<size_t>(y) * w + 2 * x + c] != nearest_c[static_cast<size_t>(y) * w + 2 * x + c];
+			renderScene(sp, 1.0f + t, w, h, gt, gc);
+			// outside the zone: compare only the right part against the ground truth
+			double se = 0.0;
+			size_t n = 0;
+			for (int y = border; y < h - border; y++)
+				for (int x = zx + border; x < w - border; x++) {
+					const double dd = static_cast<double>(res[static_cast<size_t>(y) * w + x]) - gt[static_cast<size_t>(y) * w + x];
+					se += dd * dd;
+					n++;
+				}
+			const double p_out = se <= 1e-9 ? 99.0 : 10.0 * log10(255.0 * 255.0 * n / se);
+			const bool pass = mismatches == 0 && p_out >= 26.0;
+			snprintf(line, sizeof(line), "protected zone t=%.2f: %zu pixels differ from the nearest original inside, %.2f dB outside -> %s\n",
+			         t, mismatches, p_out, pass ? "ok" : "FAIL");
+			log += line;
+			if (!pass) {
+				ok = false;
+				err = "protected zone not applied correctly";
+			}
+		}
+		ip.setProtectedZones({}, nullptr);
 	}
 	if (y_buf) cu->cuMemFree(y_buf);
 	if (c_buf) cu->cuMemFree(c_buf);

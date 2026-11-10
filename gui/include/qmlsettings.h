@@ -110,6 +110,8 @@ class QmlSettings : public QObject
 	Q_PROPERTY(QString frameGenerationNvfruc READ frameGenerationNvfruc NOTIFY frameGenerationCapabilitiesChanged)
 	Q_PROPERTY(QString frameGenerationSelfTest READ frameGenerationSelfTest NOTIFY frameGenerationCapabilitiesChanged)
 	Q_PROPERTY(QString frameGenerationEffective READ frameGenerationEffective NOTIFY frameGenerationEffectiveChanged)
+	Q_PROPERTY(QVariantList frameGenerationZones READ frameGenerationZones NOTIFY frameGenerationZonesChanged)
+	Q_PROPERTY(bool frameGenerationShowZones READ frameGenerationShowZones WRITE setFrameGenerationShowZones NOTIFY frameGenerationZonesChanged)
 	Q_PROPERTY(bool placeboDeinterlaceEnabled READ placeboDeinterlaceEnabled WRITE setPlaceboDeinterlaceEnabled NOTIFY placeboDeinterlaceEnabledChanged)
 	Q_PROPERTY(int placeboDeinterlacePreset READ placeboDeinterlacePreset WRITE setPlaceboDeinterlacePreset NOTIFY placeboDeinterlacePresetChanged)
 	Q_PROPERTY(int placeboDeinterlaceAlgorithm READ placeboDeinterlaceAlgorithm WRITE setPlaceboDeinterlaceAlgorithm NOTIFY placeboDeinterlaceAlgorithmChanged)
@@ -372,6 +374,13 @@ public:
     void setFrameGenerationCapabilities(const QVariantList &modes, bool probing, const QString &summary,
                                         const QString &nvfruc, const QString &self_test);
     void setFrameGenerationEffective(const QString &effective);
+    // Protected zones as [{x, y, w, h}] in percent of the video (0..100)
+    QVariantList frameGenerationZones() const;
+    Q_INVOKABLE void addFrameGenerationZone();
+    Q_INVOKABLE void removeFrameGenerationZone(int index);
+    Q_INVOKABLE void setFrameGenerationZone(int index, double x, double y, double w, double h);
+    bool frameGenerationShowZones() const;
+    void setFrameGenerationShowZones(bool show);
 
     bool placeboDeinterlaceEnabled() const;
     void setPlaceboDeinterlaceEnabled(bool enabled);
@@ -731,6 +740,7 @@ signals:
     void frameGenerationChanged();
     void frameGenerationCapabilitiesChanged();
     void frameGenerationEffectiveChanged();
+    void frameGenerationZonesChanged();
     void placeboDeinterlaceEnabledChanged();
     void placeboDeinterlacePresetChanged();
     void placeboDeinterlaceAlgorithmChanged();

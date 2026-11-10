@@ -37,6 +37,7 @@ extern "C" {
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFrame>
+#include <QPainter>
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLFramebufferObject>
@@ -348,6 +349,88 @@ private:
     uint64_t last_shown_frames = 0;
     double stream_fps = -1.0;
     double shown_fps = -1.0;
+};
+
+// Outlines of the frame generation protected zones, drawn over the video while streaming so
+// they can be placed on top of the game's HUD.
+class ZoneOverlayWidget : public QWidget
+{
+public:
+    ZoneOverlayWidget(QmlMainWindow *owner, Settings *settings)
+        : QWidget(nullptr)
+        , owner(owner)
+        , settings(settings)
+    {
+        setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFocusPolicy(Qt::NoFocus);
+        setAutoFillBackground(false);
+    }
+
+    void setOverlayVisible(bool visible)
+    {
+        if (visible) {
+            syncGeometry();
+            if (!isVisible())
+                show();
+            if (QWindow *w = windowHandle())
+                w->setTransientParent(owner);
+            update();
+            if (owner)
+                owner->requestActivate();
+        } else {
+            if (QWindow *w = windowHandle())
+                w->setTransientParent(nullptr);
+            hide();
+        }
+    }
+
+    void syncGeometry()
+    {
+        if (owner && geometry() != owner->geometry())
+            setGeometry(owner->geometry());
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        if (!settings || !owner)
+            return;
+        // Where the 16:9 video lands in the window for the current video mode
+        const QRectF win(QPointF(0, 0), QSizeF(size()));
+        const double aspect = 16.0 / 9.0;
+        QRectF video = win;
+        if (owner->videoMode() != QmlMainWindow::VideoMode::Stretch) {
+            const bool cover = owner->videoMode() == QmlMainWindow::VideoMode::Zoom;
+            const double scale = cover ? qMax(win.width() / aspect, win.height()) : qMin(win.width() / aspect, win.height());
+            const QSizeF sz(scale * aspect, scale);
+            video = QRectF(win.center() - QPointF(sz.width() / 2.0, sz.height() / 2.0), sz);
+        }
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QList<QRectF> zones = settings->GetFrameGenerationZones();
+        QFont font = p.font();
+        font.setPixelSize(16);
+        font.setBold(true);
+        p.setFont(font);
+        for (int i = 0; i < zones.size(); i++) {
+            const QRectF &z = zones[i];
+            const QRectF r(video.x() + z.x() * video.width(), video.y() + z.y() * video.height(),
+                           z.width() * video.width(), z.height() * video.height());
+            p.fillRect(r, QColor(255, 193, 7, 40));
+            QPen pen(QColor(255, 193, 7), 2, Qt::DashLine);
+            p.setPen(pen);
+            p.drawRect(r.adjusted(1, 1, -1, -1));
+            p.drawText(r.adjusted(6, 4, -4, -4), Qt::AlignLeft | Qt::AlignTop, QStringLiteral("%1").arg(i + 1));
+        }
+    }
+
+private:
+    QPointer<QmlMainWindow> owner;
+    Settings *settings = nullptr;
 };
 
 class DeferredPresentPacerThread final : public QThread
@@ -2628,6 +2711,11 @@ QmlMainWindow::~QmlMainWindow()
         delete stats_overlay_widget;
         stats_overlay_widget = nullptr;
     }
+    if (zones_overlay_widget) {
+        zones_overlay_widget->hide();
+        delete zones_overlay_widget;
+        zones_overlay_widget = nullptr;
+    }
 
     drainRenderThread();
 
@@ -2894,6 +2982,22 @@ void QmlMainWindow::updateStatsOverlayGeometry()
 {
     if (stats_overlay_widget)
         stats_overlay_widget->syncGeometry();
+    if (zones_overlay_widget && zones_overlay_widget->isVisible())
+        zones_overlay_widget->syncGeometry();
+}
+
+void QmlMainWindow::setZonesOverlayActive(bool active)
+{
+    zones_overlay_requested = active;
+    updateZonesOverlay();
+}
+
+void QmlMainWindow::updateZonesOverlay()
+{
+    if (!zones_overlay_widget)
+        return;
+    const bool show = zones_overlay_requested && settings && settings->GetFrameGenerationShowZones();
+    zones_overlay_widget->setOverlayVisible(show);
 }
 
 bool QmlMainWindow::directStream() const
@@ -5249,6 +5353,7 @@ renderer_backend_ready:
 
     backend = new QmlBackend(settings, this);
     stats_overlay_widget = new StatsOverlayWidget(this, backend);
+    zones_overlay_widget = new ZoneOverlayWidget(this, settings);
     connect(backend, &QmlBackend::sessionChanged, this, [this, exit_app_on_stream_exit](StreamSession *s) {
         const bool preserve_startup_warmup = s && startup_warmup_preserve_next_session_change;
         startup_warmup_preserve_next_session_change = false;
