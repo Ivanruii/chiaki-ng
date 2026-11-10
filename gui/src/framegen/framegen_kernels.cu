@@ -129,16 +129,22 @@ __device__ __forceinline__ void fg_weights(float t, float v0, float v1, float &w
 }
 
 // Protected zones (x0, y0, x1, y1 in luma pixels): areas such as a game HUD where the
-// generated frame shows the temporally nearest original instead of motion-compensated
-// pixels, so static overlays never pick up the motion of what is behind them.
-__device__ __forceinline__ bool fg_in_zone(const float4 *zones, int nzones, float x, float y)
+// generated frame keeps the temporally nearest original. Only pixels that barely change
+// between the two originals are kept (the HUD itself); content moving behind the HUD is
+// still interpolated, so fast camera motion leaves no seam at the zone border. The zone
+// edge itself is feathered.
+
+// 1 inside a zone, 0 outside, linear across a band of `feather` pixels centred on the edge.
+__device__ __forceinline__ float fg_zone_weight(const float4 *zones, int nzones, float feather, float x, float y)
 {
+	float best = 0.0f;
 	for (int i = 0; i < nzones; i++) {
 		const float4 z = zones[i];
-		if (x >= z.x && x < z.z && y >= z.y && y < z.w)
-			return true;
+		// signed distance to the rectangle edge, positive inside
+		const float d = fminf(fminf(x - z.x, z.z - x), fminf(y - z.y, z.w - y));
+		best = fmaxf(best, fg_clampf(0.5f + d / feather, 0.0f, 1.0f));
 	}
-	return false;
+	return best;
 }
 
 template<typename T>
@@ -146,6 +152,39 @@ __device__ __forceinline__ T fg_store(float v, float maxv)
 {
 	v = fg_clampf(v + 0.5f, 0.0f, maxv);
 	return (T)v;
+}
+
+// Protection mask for one pair (computed once, reused for every generated position):
+// zone weight (feathered) x "static" weight. A pixel is static when the mean absolute luma
+// difference between the two originals over a 5x5 window is small; a soft ramp between
+// `static_lo` and `static_hi` (8-bit units) avoids hard switching on compression noise.
+template<typename T>
+__device__ __forceinline__ void fg_zone_mask_impl(const unsigned char *y0p, unsigned int y0_pitch, const unsigned char *y1p, unsigned int y1_pitch,
+                                                  int w, int h, const float4 *zones, int nzones, float feather,
+                                                  float static_lo, float static_hi, float scale, unsigned char *mask, int mask_pitch)
+{
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+	if (x >= w || y >= h)
+		return;
+	const float zw = fg_zone_weight(zones, nzones, feather, (float)x + 0.5f, (float)y + 0.5f);
+	if (zw <= 0.0f) {
+		mask[(size_t)y * mask_pitch + x] = 0;
+		return;
+	}
+	float sum = 0.0f;
+	for (int dy = -2; dy <= 2; dy++) {
+		const int sy = min(max(y + dy, 0), h - 1);
+		const T *r0 = reinterpret_cast<const T *>(y0p + (size_t)sy * y0_pitch);
+		const T *r1 = reinterpret_cast<const T *>(y1p + (size_t)sy * y1_pitch);
+		for (int dx = -2; dx <= 2; dx++) {
+			const int sx = min(max(x + dx, 0), w - 1);
+			sum += fabsf((float)r0[sx] - (float)r1[sx]);
+		}
+	}
+	const float diff = sum * (1.0f / 25.0f) * scale;
+	const float sw = 1.0f - fg_clampf((diff - static_lo) / (static_hi - static_lo), 0.0f, 1.0f);
+	mask[(size_t)y * mask_pitch + x] = (unsigned char)(zw * sw * 255.0f + 0.5f);
 }
 
 extern "C" {
@@ -233,7 +272,7 @@ __global__ void fg_consistency(const FgFlow *f01, const FgFlow *f10, int bw, int
 __global__ void NAME(const unsigned char *y0p, unsigned int y0_pitch, const unsigned char *y1p, unsigned int y1_pitch, \
                      unsigned char *dst, unsigned int dst_pitch, int w, int h, \
                      const FgFlow *f01, const FgFlow *f10, const float *vis0, const float *vis1, \
-                     int bw, int bh, float grid, float t, const float4 *zones, int nzones) \
+                     int bw, int bh, float grid, float t, const unsigned char *mask, int mask_pitch) \
 { \
 	const int x = blockIdx.x * blockDim.x + threadIdx.x; \
 	const int y = blockIdx.y * blockDim.y + threadIdx.y; \
@@ -241,9 +280,10 @@ __global__ void NAME(const unsigned char *y0p, unsigned int y0_pitch, const unsi
 		return; \
 	const float cx = (float)x + 0.5f; \
 	const float cy = (float)y + 0.5f; \
-	if (nzones > 0 && fg_in_zone(zones, nzones, cx, cy)) { \
-		const unsigned char *src = t < 0.5f ? y0p + (size_t)y * y0_pitch : y1p + (size_t)y * y1_pitch; \
-		reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = reinterpret_cast<const T *>(src)[x]; \
+	const float m = mask ? mask[(size_t)y * mask_pitch + x] * (1.0f / 255.0f) : 0.0f; \
+	const float nearest = (float)reinterpret_cast<const T *>(t < 0.5f ? y0p + (size_t)y * y0_pitch : y1p + (size_t)y * y1_pitch)[x]; \
+	if (m >= 0.999f) { \
+		reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = (T)nearest; \
 		return; \
 	} \
 	float px, py, qx, qy; \
@@ -255,14 +295,14 @@ __global__ void NAME(const unsigned char *y0p, unsigned int y0_pitch, const unsi
 	fg_weights(t, v0, v1, w0, w1); \
 	const float s0 = fg_sample1<T>(y0p, y0_pitch, w, h, px, py); \
 	const float s1 = fg_sample1<T>(y1p, y1_pitch, w, h, qx, qy); \
-	reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = fg_store<T>(w0 * s0 + w1 * s1, MAXV); \
+	reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = fg_store<T>(m * nearest + (1.0f - m) * (w0 * s0 + w1 * s1), MAXV); \
 }
 
 #define FG_SYNTH_CHROMA(NAME, T, MAXV) \
 __global__ void NAME(const unsigned char *uv0p, unsigned int uv0_pitch, const unsigned char *uv1p, unsigned int uv1_pitch, \
                      unsigned char *dst, unsigned int dst_pitch, int cw, int ch, \
                      const FgFlow *f01, const FgFlow *f10, const float *vis0, const float *vis1, \
-                     int bw, int bh, float grid, float t, const float4 *zones, int nzones) \
+                     int bw, int bh, float grid, float t, const unsigned char *mask, int mask_pitch) \
 { \
 	const int x = blockIdx.x * blockDim.x + threadIdx.x; \
 	const int y = blockIdx.y * blockDim.y + threadIdx.y; \
@@ -271,11 +311,18 @@ __global__ void NAME(const unsigned char *uv0p, unsigned int uv0_pitch, const un
 	/* chroma sample centre in luma coordinates */ \
 	const float lx = ((float)x + 0.5f) * 2.0f; \
 	const float ly = ((float)y + 0.5f) * 2.0f; \
-	if (nzones > 0 && fg_in_zone(zones, nzones, lx, ly)) { \
-		const unsigned char *src = t < 0.5f ? uv0p + (size_t)y * uv0_pitch : uv1p + (size_t)y * uv1_pitch; \
+	/* mask is at luma resolution: average the 2x2 luma pixels of this chroma sample */ \
+	float m = 0.0f; \
+	if (mask) { \
+		const unsigned char *m0 = mask + (size_t)(2 * y) * mask_pitch + 2 * x; \
+		m = (m0[0] + m0[1] + m0[mask_pitch] + m0[mask_pitch + 1]) * (1.0f / (4.0f * 255.0f)); \
+	} \
+	const T *nsrc = reinterpret_cast<const T *>(t < 0.5f ? uv0p + (size_t)y * uv0_pitch : uv1p + (size_t)y * uv1_pitch); \
+	const float nu = (float)nsrc[2 * x], nv = (float)nsrc[2 * x + 1]; \
+	if (m >= 0.999f) { \
 		T *drow = reinterpret_cast<T *>(dst + (size_t)y * dst_pitch); \
-		drow[2 * x] = reinterpret_cast<const T *>(src)[2 * x]; \
-		drow[2 * x + 1] = reinterpret_cast<const T *>(src)[2 * x + 1]; \
+		drow[2 * x] = (T)nu; \
+		drow[2 * x + 1] = (T)nv; \
 		return; \
 	} \
 	float px, py, qx, qy; \
@@ -289,14 +336,28 @@ __global__ void NAME(const unsigned char *uv0p, unsigned int uv0_pitch, const un
 	fg_sample2<T>(uv0p, uv0_pitch, cw, ch, px * 0.5f, py * 0.5f, u0, vv0); \
 	fg_sample2<T>(uv1p, uv1_pitch, cw, ch, qx * 0.5f, qy * 0.5f, u1, vv1); \
 	T *row = reinterpret_cast<T *>(dst + (size_t)y * dst_pitch); \
-	row[2 * x] = fg_store<T>(w0 * u0 + w1 * u1, MAXV); \
-	row[2 * x + 1] = fg_store<T>(w0 * vv0 + w1 * vv1, MAXV); \
+	row[2 * x] = fg_store<T>(m * nu + (1.0f - m) * (w0 * u0 + w1 * u1), MAXV); \
+	row[2 * x + 1] = fg_store<T>(m * nv + (1.0f - m) * (w0 * vv0 + w1 * vv1), MAXV); \
 }
 
 FG_SYNTH_LUMA(fg_synth_luma8, unsigned char, 255.0f)
 FG_SYNTH_CHROMA(fg_synth_chroma8, unsigned char, 255.0f)
 FG_SYNTH_LUMA(fg_synth_luma16, unsigned short, 65535.0f)
 FG_SYNTH_CHROMA(fg_synth_chroma16, unsigned short, 65535.0f)
+
+__global__ void fg_zone_mask8(const unsigned char *y0p, unsigned int y0_pitch, const unsigned char *y1p, unsigned int y1_pitch,
+                              int w, int h, const float4 *zones, int nzones, float feather,
+                              float static_lo, float static_hi, unsigned char *mask, int mask_pitch)
+{
+	fg_zone_mask_impl<unsigned char>(y0p, y0_pitch, y1p, y1_pitch, w, h, zones, nzones, feather, static_lo, static_hi, 1.0f, mask, mask_pitch);
+}
+
+__global__ void fg_zone_mask16(const unsigned char *y0p, unsigned int y0_pitch, const unsigned char *y1p, unsigned int y1_pitch,
+                               int w, int h, const float4 *zones, int nzones, float feather,
+                               float static_lo, float static_hi, unsigned char *mask, int mask_pitch)
+{
+	fg_zone_mask_impl<unsigned short>(y0p, y0_pitch, y1p, y1_pitch, w, h, zones, nzones, feather, static_lo, static_hi, 1.0f / 256.0f, mask, mask_pitch);
+}
 
 // P010 luma (10 bits in the high bits of 16) -> 8-bit grayscale for the optical flow engine.
 __global__ void fg_luma16_to_gray8(const unsigned char *src, unsigned int src_pitch, unsigned char *dst, unsigned int dst_pitch, int w, int h)

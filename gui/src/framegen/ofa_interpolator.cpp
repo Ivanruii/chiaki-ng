@@ -105,6 +105,7 @@ struct OfaInterpolator::Impl
 	CUmodule module = nullptr;
 	CUfunction k_unpack = nullptr, k_median = nullptr, k_consistency = nullptr;
 	CUfunction k_luma8 = nullptr, k_chroma8 = nullptr, k_luma16 = nullptr, k_chroma16 = nullptr, k_l16to8 = nullptr;
+	CUfunction k_mask8 = nullptr, k_mask16 = nullptr;
 
 	NvOFGPUBufferHandle gray[2] = {};
 	CUdeviceptr gray_ptr[2] = {};
@@ -119,6 +120,8 @@ struct OfaInterpolator::Impl
 	CUdeviceptr raw01 = 0, raw10 = 0, f01 = 0, f10 = 0, vis0 = 0, vis1 = 0, counters = 0;
 	CUdeviceptr zones = 0;
 	int nzones = 0;
+	CUdeviceptr mask = 0;   // protection weight per luma pixel (0..255), pitch = width
+	bool mask_valid = false;
 	CUevent ev_begin = nullptr, ev_end = nullptr;
 
 	int grid = 4;
@@ -282,6 +285,8 @@ bool OfaInterpolator::init(CUcontext context, int width, int height, PixelLayout
 		{ &d->k_luma16, "fg_synth_luma16" },
 		{ &d->k_chroma16, "fg_synth_chroma16" },
 		{ &d->k_l16to8, "fg_luma16_to_gray8" },
+		{ &d->k_mask8, "fg_zone_mask8" },
+		{ &d->k_mask16, "fg_zone_mask16" },
 	};
 	for (auto &k : kernels) {
 		r = cu->cuModuleGetFunction(k.fn, d->module, k.name);
@@ -385,7 +390,8 @@ bool OfaInterpolator::init(CUcontext context, int width, int height, PixelLayout
 	if ((r = cu->cuMemAlloc(&d->vis0, vis_bytes)) != CHIAKI_CUDA_SUCCESS
 	    || (r = cu->cuMemAlloc(&d->vis1, vis_bytes)) != CHIAKI_CUDA_SUCCESS
 	    || (r = cu->cuMemAlloc(&d->counters, 4 * sizeof(uint32_t))) != CHIAKI_CUDA_SUCCESS
-	    || (r = cu->cuMemAlloc(&d->zones, kMaxProtectedZones * 4 * sizeof(float))) != CHIAKI_CUDA_SUCCESS)
+	    || (r = cu->cuMemAlloc(&d->zones, kMaxProtectedZones * 4 * sizeof(float))) != CHIAKI_CUDA_SUCCESS
+	    || (r = cu->cuMemAlloc(&d->mask, static_cast<size_t>(w) * h)) != CHIAKI_CUDA_SUCCESS)
 		return fail(cuError("cuMemAlloc", r));
 	cu->cuEventCreate(&d->ev_begin, CHIAKI_CU_EVENT_DEFAULT);
 	cu->cuEventCreate(&d->ev_end, CHIAKI_CU_EVENT_DEFAULT);
@@ -421,7 +427,7 @@ void OfaInterpolator::destroy()
 		if (d->hist_chroma[i])
 			cu->cuMemFree(d->hist_chroma[i]);
 	}
-	CUdeviceptr bufs[] = { d->raw01, d->raw10, d->f01, d->f10, d->vis0, d->vis1, d->counters, d->zones };
+	CUdeviceptr bufs[] = { d->raw01, d->raw10, d->f01, d->f10, d->vis0, d->vis1, d->counters, d->zones, d->mask };
 	for (CUdeviceptr p : bufs)
 		if (p)
 			cu->cuMemFree(p);
@@ -500,6 +506,7 @@ PairAnalysis OfaInterpolator::pushFrame(const GpuFrame &src, std::string *error)
 	}
 	const int prev = d->cur;
 	d->cur = slot;
+	d->mask_valid = false;
 	d->frames = std::min(d->frames + 1, 2);
 	d->pair_valid = false;
 	if (d->frames < 2)
@@ -603,17 +610,33 @@ bool OfaInterpolator::synthesize(float t, const GpuFrame &dst, std::string *erro
 	unsigned int y1p = static_cast<unsigned int>(d->hist_luma_pitch[i1]);
 	unsigned int ydp = static_cast<unsigned int>(dst.luma_pitch);
 	int ww = w, hh = h;
-	CUdeviceptr zones = d->zones;
-	int nzones = d->nzones;
-	void *largs[] = { &y0, &y0p, &y1, &y1p, &yd, &ydp, &ww, &hh, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &zones, &nzones };
-	CUresult r = cu->cuLaunchKernel(hi ? d->k_luma16 : d->k_luma8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, largs, nullptr);
+	CUresult r = CHIAKI_CUDA_SUCCESS;
+	if (d->nzones > 0 && !d->mask_valid) {
+		// once per pair: protection weight = feathered zone x "barely changes between originals"
+		CUdeviceptr zones = d->zones, mask = d->mask;
+		int nzones = d->nzones, mask_pitch = w;
+		float feather = std::max(8.0f, 24.0f * h / 1080.0f);
+		float static_lo = 3.0f, static_hi = 10.0f;
+		void *margs[] = { &y0, &y0p, &y1, &y1p, &ww, &hh, &zones, &nzones, &feather, &static_lo, &static_hi, &mask, &mask_pitch };
+		r = cu->cuLaunchKernel(hi ? d->k_mask16 : d->k_mask8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, margs, nullptr);
+		if (r != CHIAKI_CUDA_SUCCESS) {
+			if (error)
+				*error = cuError("Protected zone mask kernel", r);
+			return false;
+		}
+		d->mask_valid = true;
+	}
+	CUdeviceptr mask = d->nzones > 0 ? d->mask : 0;
+	int mask_pitch = w;
+	void *largs[] = { &y0, &y0p, &y1, &y1p, &yd, &ydp, &ww, &hh, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &mask, &mask_pitch };
+	r = cu->cuLaunchKernel(hi ? d->k_luma16 : d->k_luma8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, largs, nullptr);
 	if (r == CHIAKI_CUDA_SUCCESS) {
 		CUdeviceptr c0 = d->hist_chroma[i0], c1 = d->hist_chroma[i1], cd = dst.chroma;
 		unsigned int c0p = static_cast<unsigned int>(d->hist_chroma_pitch[i0]);
 		unsigned int c1p = static_cast<unsigned int>(d->hist_chroma_pitch[i1]);
 		unsigned int cdp = static_cast<unsigned int>(dst.chroma_pitch);
 		int cw = w / 2, ch = h / 2;
-		void *cargs[] = { &c0, &c0p, &c1, &c1p, &cd, &cdp, &cw, &ch, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &zones, &nzones };
+		void *cargs[] = { &c0, &c0p, &c1, &c1p, &cd, &cdp, &cw, &ch, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &mask, &mask_pitch };
 		r = cu->cuLaunchKernel(hi ? d->k_chroma16 : d->k_chroma8, divUp(cw, 32), divUp(ch, 8), 1, 32, 8, 1, 0, cu_stream, cargs, nullptr);
 	}
 	if (r != CHIAKI_CUDA_SUCCESS) {
@@ -654,6 +677,7 @@ bool OfaInterpolator::setProtectedZones(const std::vector<ProtectedZone> &zones,
 		return false;
 	}
 	d->nzones = n;
+	d->mask_valid = false;
 	return true;
 }
 
@@ -683,6 +707,8 @@ struct SceneParams
 	float fg_vx = -12.0f, fg_vy = 7.0f;  // foreground square motion per original frame (px)
 	float fg_x = 0.0f, fg_y = 0.0f;      // foreground top-left at time 0
 	float fg_size = 0.0f;
+	// static overlay (game HUD) drawn on top of everything, same in every frame
+	float hud_x = 0.0f, hud_y = 0.0f, hud_w = 0.0f, hud_h = 0.0f;
 };
 
 // Smooth value noise: non-periodic texture so the motion search has a unique answer, like
@@ -744,7 +770,9 @@ void renderScene(const SceneParams &sp, float time, int w, int h, std::vector<ui
 		for (int x = 0; x < w; x++) {
 			const float cx = x + 0.5f, cy = y + 0.5f;
 			float v;
-			if (cx >= fx0 && cx < fx0 + sp.fg_size && cy >= fy0 && cy < fy0 + sp.fg_size)
+			if (cx >= sp.hud_x && cx < sp.hud_x + sp.hud_w && cy >= sp.hud_y && cy < sp.hud_y + sp.hud_h)
+				v = 40.0f + 200.0f * texture(cx, cy, 211);
+			else if (cx >= fx0 && cx < fx0 + sp.fg_size && cy >= fy0 && cy < fy0 + sp.fg_size)
 				v = fgLuma(cx - fx0, cy - fy0);
 			else
 				v = bgLuma(cx - ox, cy - oy);
@@ -755,7 +783,9 @@ void renderScene(const SceneParams &sp, float time, int w, int h, std::vector<ui
 			for (int c = 0; c < 2; c++) {
 				const float cx = 2.0f * (x + 0.5f), cy = 2.0f * (y + 0.5f);
 				float v;
-				if (cx >= fx0 && cx < fx0 + sp.fg_size && cy >= fy0 && cy < fy0 + sp.fg_size)
+				if (cx >= sp.hud_x && cx < sp.hud_x + sp.hud_w && cy >= sp.hud_y && cy < sp.hud_y + sp.hud_h)
+					v = 60.0f + 130.0f * texture(cx * 0.5f, cy * 0.5f, 241 + c * 7);
+				else if (cx >= fx0 && cx < fx0 + sp.fg_size && cy >= fy0 && cy < fy0 + sp.fg_size)
 					v = fgChroma(cx - fx0, cy - fy0, c);
 				else
 					v = bgChroma(cx - ox, cy - oy, c);
@@ -909,45 +939,85 @@ bool OfaInterpolator::selfTest(CUcontext ctx, std::string *report, int w, int h,
 			err = "generated frame does not match the expected motion";
 		}
 	}
-	// Protected zone: the left third must be the nearest original, pixel for pixel, while
-	// the rest stays motion compensated.
+	// Protected zone over a static HUD while the whole background pans behind it: the HUD
+	// must stay exactly the nearest original, the background inside the zone must still be
+	// interpolated (no frozen strip / seam at the zone border).
 	if (ok) {
+		SceneParams hp = sp;
+		hp.fg_size = 0.0f; // background motion only, plus the HUD
+		hp.bg_vx = 14.0f;  // fast pan
+		hp.bg_vy = 3.0f;
+		hp.hud_x = std::floor(w * 0.06f);
+		hp.hud_y = std::floor(h * 0.62f);
+		hp.hud_w = std::floor(w * 0.16f);
+		hp.hud_h = std::floor(h * 0.20f);
+		// zone generously larger than the HUD, as a user would draw it
 		std::vector<ProtectedZone> zones(1);
-		zones[0].x0 = 0.0f;
-		zones[0].y0 = 0.0f;
-		zones[0].x1 = 1.0f / 3.0f;
-		zones[0].y1 = 1.0f;
-		const int zx = w / 3;
-		for (float t : { 0.25f, 0.75f }) {
+		zones[0].x0 = (hp.hud_x - w * 0.04f) / w;
+		zones[0].y0 = (hp.hud_y - h * 0.08f) / h;
+		zones[0].x1 = (hp.hud_x + hp.hud_w + w * 0.06f) / w;
+		zones[0].y1 = (hp.hud_y + hp.hud_h + h * 0.08f) / h;
+		std::vector<uint8_t> hl0, hc0, hl1, hc1;
+		ip.reset();
+		for (int f = 0; ok && f < 3; f++) {
+			std::vector<uint8_t> l, c;
+			renderScene(hp, static_cast<float>(f), w, h, l, c);
+			if (f == 1) { hl0 = l; hc0 = c; }
+			if (f == 2) { hl1 = l; hc1 = c; }
+			ok = upload(l, c);
+			if (ok) {
+				pa = ip.pushFrame(in, &err);
+				ok = err.empty() && (f < 2 || pa.valid);
+			}
+		}
+		ok = ok && ip.setProtectedZones(zones, &err);
+		const int zx0 = static_cast<int>(zones[0].x0 * w), zx1 = static_cast<int>(zones[0].x1 * w);
+		const int zy0 = static_cast<int>(zones[0].y0 * h), zy1 = static_cast<int>(zones[0].y1 * h);
+		const int feather = static_cast<int>(std::max(8.0f, 24.0f * h / 1080.0f));
+		const int hx0 = static_cast<int>(hp.hud_x), hx1 = static_cast<int>(hp.hud_x + hp.hud_w);
+		const int hy0 = static_cast<int>(hp.hud_y), hy1 = static_cast<int>(hp.hud_y + hp.hud_h);
+		for (float t : { 0.25f, 0.5f, 0.75f }) {
 			if (!ok)
 				break;
-			ok = ip.setProtectedZones(zones, &err) && ip.synthesize(t, out, &err) && download(res, res_c);
+			ok = ip.synthesize(t, out, &err) && download(res, res_c);
 			if (!ok)
 				break;
-			const std::vector<uint8_t> &nearest = t < 0.5f ? l0 : l1;
-			const std::vector<uint8_t> &nearest_c = t < 0.5f ? c0 : c1;
-			size_t mismatches = 0;
-			for (int y = 0; y < h; y++)
-				for (int x = 0; x < zx - 1; x++)
-					mismatches += res[static_cast<size_t>(y) * w + x] != nearest[static_cast<size_t>(y) * w + x];
-			for (int y = 0; y < h / 2; y++)
-				for (int x = 0; x < (zx - 2) / 2; x++)
-					for (int c = 0; c < 2; c++)
-						mismatches += res_c[static_cast<size_t>(y) * w + 2 * x + c] != nearest_c[static_cast<size_t>(y) * w + 2 * x + c];
-			renderScene(sp, 1.0f + t, w, h, gt, gc);
-			// outside the zone: compare only the right part against the ground truth
-			double se = 0.0;
-			size_t n = 0;
-			for (int y = border; y < h - border; y++)
-				for (int x = zx + border; x < w - border; x++) {
-					const double dd = static_cast<double>(res[static_cast<size_t>(y) * w + x]) - gt[static_cast<size_t>(y) * w + x];
-					se += dd * dd;
-					n++;
+			renderScene(hp, 1.0f + t, w, h, gt, gc);
+			const std::vector<uint8_t> &nearest = t < 0.5f ? hl0 : hl1;
+			// 1) HUD interior (away from its own edge, where the 5x5 window sees the background)
+			size_t hud_mismatch = 0;
+			for (int y = hy0 + 4; y < hy1 - 4; y++)
+				for (int x = hx0 + 4; x < hx1 - 4; x++)
+					hud_mismatch += res[static_cast<size_t>(y) * w + x] != nearest[static_cast<size_t>(y) * w + x];
+			// 2) background inside the zone (outside the HUD) vs ground truth and vs frozen original
+			// 3) band across the zone border vs ground truth (a seam would show up here)
+			double se_bg = 0.0, se_bg_frozen = 0.0, se_edge = 0.0;
+			size_t n_bg = 0, n_edge = 0;
+			for (int y = std::max(zy0 - feather, border); y < std::min(zy1 + feather, h - border); y++)
+				for (int x = std::max(zx0 - feather, border); x < std::min(zx1 + feather, w - border); x++) {
+					const bool near_hud = x >= hx0 - 6 && x < hx1 + 6 && y >= hy0 - 6 && y < hy1 + 6;
+					if (near_hud)
+						continue;
+					const size_t i = static_cast<size_t>(y) * w + x;
+					const double d = static_cast<double>(res[i]) - gt[i];
+					const bool inside = x >= zx0 + feather && x < zx1 - feather && y >= zy0 + feather && y < zy1 - feather;
+					const bool edge = !inside;
+					if (inside) {
+						const double df = static_cast<double>(nearest[i]) - gt[i];
+						se_bg += d * d;
+						se_bg_frozen += df * df;
+						n_bg++;
+					} else if (edge) {
+						se_edge += d * d;
+						n_edge++;
+					}
 				}
-			const double p_out = se <= 1e-9 ? 99.0 : 10.0 * log10(255.0 * 255.0 * n / se);
-			const bool pass = mismatches == 0 && p_out >= 26.0;
-			snprintf(line, sizeof(line), "protected zone t=%.2f: %zu pixels differ from the nearest original inside, %.2f dB outside -> %s\n",
-			         t, mismatches, p_out, pass ? "ok" : "FAIL");
+			const auto to_psnr = [](double se, size_t n) { return se <= 1e-9 ? 99.0 : 10.0 * log10(255.0 * 255.0 * n / se); };
+			const double p_bg = to_psnr(se_bg, n_bg), p_frozen = to_psnr(se_bg_frozen, n_bg), p_edge = to_psnr(se_edge, n_edge);
+			const bool pass = hud_mismatch == 0 && p_bg >= 26.0 && p_bg >= p_frozen + 4.0 && p_edge >= 26.0;
+			snprintf(line, sizeof(line),
+			         "protected zone t=%.2f: HUD %zu px differ | background in zone %.2f dB (frozen would be %.2f dB) | zone border %.2f dB -> %s\n",
+			         t, hud_mismatch, p_bg, p_frozen, p_edge, pass ? "ok" : "FAIL");
 			log += line;
 			if (!pass) {
 				ok = false;
