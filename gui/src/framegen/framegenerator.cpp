@@ -225,6 +225,7 @@ bool FrameGenerator::start(const Config &config, QString *error)
 	generation_failed = false;
 	have_prev = false;
 	last_emit_us = 0;
+	sched_delay_us = 0;
 	{
 		std::lock_guard<std::mutex> lock(stats_mutex);
 		st = FrameGeneratorStats();
@@ -576,6 +577,7 @@ void FrameGenerator::process(Input &in)
 	const double step = interval / std::max(n, 1);
 	const int64_t step_us = static_cast<int64_t>(step * 1e6);
 	std::vector<Output> produced;
+	int generated_count = 0;
 
 	if (n > 1 && !generation_failed && pair.valid && !discontinuity) {
 		std::vector<AVFrame *> cuda_out;
@@ -609,7 +611,8 @@ void FrameGenerator::process(Input &in)
 					f.pts = in.frame.pts - interval + j * step;
 					f.duration = step;
 					f.recovered = false;
-					produced.push_back({ f, 0, in.arrival_us + (j - 1) * step_us, true });
+					produced.push_back({ f, 0, j - 1, true });
+					generated_count++;
 				}
 			}
 			av_frame_free(&cuda_out[k]);
@@ -626,8 +629,25 @@ void FrameGenerator::process(Input &in)
 		f.frame = original;
 		if (n > 1)
 			f.duration = step;
-		produced.push_back({ f, in.frames_lost, in.arrival_us + (n - 1) * step_us, false });
+		produced.push_back({ f, in.frames_lost, n - 1, false });
 	}
+
+	// Release schedule. The frames are only ready now, after flow, synthesis and the copies
+	// to Vulkan, so anchoring the first generated frame at the arrival time would make it
+	// late by the whole processing time (at x4 that exceeds the late tolerance and the
+	// frame was always dropped). Anchor the schedule at arrival + a smoothed processing
+	// delay instead: the cadence stays even from pair to pair, and never earlier than now.
+	const int64_t ready_us = nowUs();
+	int64_t base_us = ready_us;
+	if (n > 1) {
+		if (generated_count > 0) {
+			const int64_t delay_us = ready_us - in.arrival_us;
+			sched_delay_us = sched_delay_us <= 0 ? delay_us : sched_delay_us + (delay_us - sched_delay_us) / 8;
+		}
+		base_us = std::max(in.arrival_us + sched_delay_us + kScheduleMarginUs, ready_us);
+	}
+	for (auto &o : produced)
+		o.due_us = base_us + o.due_us * step_us;
 
 	FrameGeneratorStats snapshot;
 	bool log_stats = false;
@@ -645,6 +665,7 @@ void FrameGenerator::process(Input &in)
 		                                 << " dropped_late=" << snapshot.dropped_late << " dropped_backlog=" << snapshot.dropped_backlog
 		                                 << " skipped_pairs=" << snapshot.skipped_pairs << " resets=" << snapshot.resets
 		                                 << " last_pair_ms=" << snapshot.last_pair_ms << " flow_gpu_ms=" << pair.flow_ms
+		                                 << " sched_delay_ms=" << sched_delay_us / 1000.0
 		                                 << (interop_gpu ? " interop=gpu" : " interop=cpu");
 	{
 		std::lock_guard<std::mutex> lock(mutex);

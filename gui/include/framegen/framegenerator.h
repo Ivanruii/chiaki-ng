@@ -11,8 +11,9 @@
 //
 // Timing: when original N arrives, the frames between N-1 and N are generated at
 // k/multiplier of the real interval and released at evenly spaced wall-clock times, followed
-// by original N. Originals are therefore delayed by (multiplier-1)/multiplier of a source
-// frame interval. Generated frames that would be late, or that the display/renderer cannot
+// by original N. The schedule starts once the pair is processed (smoothed processing delay),
+// so originals are delayed by that delay plus (multiplier-1)/multiplier of a source frame
+// interval. Generated frames that would be late, or that the display/renderer cannot
 // take, are dropped; originals are never dropped by this stage.
 
 #ifndef CHIAKI_FRAMEGEN_FRAMEGENERATOR_H
@@ -180,6 +181,8 @@ private:
 	bool have_prev = false;
 	double prev_pts = 0.0;
 	int64_t last_emit_us = 0;
+	int64_t sched_delay_us = 0;           // smoothed arrival -> frames ready delay
+	static constexpr int64_t kScheduleMarginUs = 300; // absorbs jitter of the processing time
 
 	mutable std::mutex stats_mutex;
 	FrameGeneratorStats st;
