@@ -1064,6 +1064,22 @@ DialogView {
                             text: qsTr("Target: %1").arg(frameGeneration.targetText(Chiaki.settings.frameGeneration))
                         }
 
+                        C.CheckBox {
+                            text: qsTr("Low latency (extrapolation)")
+                            checked: Chiaki.settings.frameGenerationLowLatency
+                            enabled: Chiaki.settings.frameGenerationLowLatencyAvailable || checked
+                            onToggled: Chiaki.settings.frameGenerationLowLatency = checked
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            opacity: 0.7
+                            text: Chiaki.settings.frameGenerationLowLatencyAvailable || Chiaki.settings.frameGenerationProbing
+                                  ? qsTr("Shows each stream frame as soon as it is decoded and predicts the next ones from its motion, instead of holding it to interpolate (x2 holds ~8 ms, x4 ~12 ms at 60 FPS). More artifacts when motion changes direction or behind moving objects.")
+                                  : qsTr("Low latency unavailable: %1").arg(Chiaki.settings.frameGenerationLowLatencyReason)
+                        }
+
                         Label {
                             Layout.fillWidth: true
                             wrapMode: Text.Wrap

@@ -584,6 +584,7 @@ void QmlBackend::startFrameGenerationProbe()
     input.vulkan_device_extensions = window ? window->vulkanDeviceExtensions() : QStringList();
     input.cuda_decoder_available = settings_qml->availableDecoders().contains(QStringLiteral("cuda"));
     settings_qml->setFrameGenerationCapabilities({}, true, tr("Checking GPU…"), QString(), QString());
+    settings_qml->setFrameGenerationLowLatencyCapability(false, tr("checking GPU…"));
     fg_probe_future = QtConcurrent::run([this, input]() {
         AVBufferRef *cuda = nullptr;
         framegen::Capabilities caps = framegen::probeCapabilities(input, &cuda);
@@ -605,6 +606,7 @@ void QmlBackend::publishFrameGenerationCapabilities()
         caps = fg_caps;
     }
     settings_qml->setFrameGenerationCapabilities(caps.toVariantList(), false, caps.summary, caps.nvfruc, caps.self_test_report);
+    settings_qml->setFrameGenerationLowLatencyCapability(caps.low_latency_available, caps.low_latency_reason);
     if (!frame_generator) {
         QString reason;
         const int requested = settings->GetFrameGenerationMultiplier();
@@ -612,6 +614,14 @@ void QmlBackend::publishFrameGenerationCapabilities()
         settings_qml->setFrameGenerationEffective(effective > 1 ? tr("x%1 will be used in the next session").arg(effective)
                                                   : (requested > 1 ? tr("Off (x%1 unavailable: %2)").arg(requested).arg(reason) : tr("Off")));
     }
+}
+
+bool QmlBackend::resolveFrameGenerationLowLatency()
+{
+    if (!settings->GetFrameGenerationLowLatency())
+        return false;
+    QMutexLocker locker(&fg_caps_mutex);
+    return fg_caps.probed && fg_caps.low_latency_available;
 }
 
 int QmlBackend::resolveFrameGenerationMultiplier(int requested, QString *reason)
@@ -641,6 +651,7 @@ void QmlBackend::applyFrameGenerationSetting()
     if (frame_generator) {
         // The session decodes with NVDEC: switching between off/x2/x3/x4 works live.
         frame_generator->setMultiplier(effective);
+        frame_generator->setLowLatency(resolveFrameGenerationLowLatency());
         window->setStreamMaxFPS(static_cast<unsigned int>(qRound(fg_session_fps * effective)));
         if (effective <= 1)
             settings_qml->setFrameGenerationEffective(requested > 1 ? tr("Off (x%1 unavailable: %2)").arg(requested).arg(reason) : tr("Off"));
@@ -1255,6 +1266,7 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         frame_generator = new framegen::FrameGenerator();
         framegen::FrameGenerator::Config fg_config;
         fg_config.multiplier = fg_multiplier;
+        fg_config.low_latency = resolveFrameGenerationLowLatency();
         fg_config.source_fps = fg_session_fps;
         fg_config.display_hz = window->displayRefreshRate();
         {

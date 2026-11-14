@@ -106,6 +106,7 @@ struct OfaInterpolator::Impl
 	CUfunction k_unpack = nullptr, k_median = nullptr, k_consistency = nullptr;
 	CUfunction k_luma8 = nullptr, k_chroma8 = nullptr, k_luma16 = nullptr, k_chroma16 = nullptr, k_l16to8 = nullptr;
 	CUfunction k_mask8 = nullptr, k_mask16 = nullptr;
+	CUfunction k_ext_luma8 = nullptr, k_ext_chroma8 = nullptr, k_ext_luma16 = nullptr, k_ext_chroma16 = nullptr;
 
 	NvOFGPUBufferHandle gray[2] = {};
 	CUdeviceptr gray_ptr[2] = {};
@@ -287,6 +288,10 @@ bool OfaInterpolator::init(CUcontext context, int width, int height, PixelLayout
 		{ &d->k_l16to8, "fg_luma16_to_gray8" },
 		{ &d->k_mask8, "fg_zone_mask8" },
 		{ &d->k_mask16, "fg_zone_mask16" },
+		{ &d->k_ext_luma8, "fg_extrap_luma8" },
+		{ &d->k_ext_chroma8, "fg_extrap_chroma8" },
+		{ &d->k_ext_luma16, "fg_extrap_luma16" },
+		{ &d->k_ext_chroma16, "fg_extrap_chroma16" },
 	};
 	for (auto &k : kernels) {
 		r = cu->cuModuleGetFunction(k.fn, d->module, k.name);
@@ -610,26 +615,12 @@ bool OfaInterpolator::synthesize(float t, const GpuFrame &dst, std::string *erro
 	unsigned int y1p = static_cast<unsigned int>(d->hist_luma_pitch[i1]);
 	unsigned int ydp = static_cast<unsigned int>(dst.luma_pitch);
 	int ww = w, hh = h;
-	CUresult r = CHIAKI_CUDA_SUCCESS;
-	if (d->nzones > 0 && !d->mask_valid) {
-		// once per pair: protection weight = feathered zone x "barely changes between originals"
-		CUdeviceptr zones = d->zones, mask = d->mask;
-		int nzones = d->nzones, mask_pitch = w;
-		float feather = std::max(8.0f, 24.0f * h / 1080.0f);
-		float static_lo = 3.0f, static_hi = 10.0f;
-		void *margs[] = { &y0, &y0p, &y1, &y1p, &ww, &hh, &zones, &nzones, &feather, &static_lo, &static_hi, &mask, &mask_pitch };
-		r = cu->cuLaunchKernel(hi ? d->k_mask16 : d->k_mask8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, margs, nullptr);
-		if (r != CHIAKI_CUDA_SUCCESS) {
-			if (error)
-				*error = cuError("Protected zone mask kernel", r);
-			return false;
-		}
-		d->mask_valid = true;
-	}
+	if (!ensureMask(error))
+		return false;
 	CUdeviceptr mask = d->nzones > 0 ? d->mask : 0;
 	int mask_pitch = w;
 	void *largs[] = { &y0, &y0p, &y1, &y1p, &yd, &ydp, &ww, &hh, &f01, &f10, &v0, &v1, &bw, &bh, &grid, &t, &mask, &mask_pitch };
-	r = cu->cuLaunchKernel(hi ? d->k_luma16 : d->k_luma8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, largs, nullptr);
+	CUresult r = cu->cuLaunchKernel(hi ? d->k_luma16 : d->k_luma8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, largs, nullptr);
 	if (r == CHIAKI_CUDA_SUCCESS) {
 		CUdeviceptr c0 = d->hist_chroma[i0], c1 = d->hist_chroma[i1], cd = dst.chroma;
 		unsigned int c0p = static_cast<unsigned int>(d->hist_chroma_pitch[i0]);
@@ -642,6 +633,73 @@ bool OfaInterpolator::synthesize(float t, const GpuFrame &dst, std::string *erro
 	if (r != CHIAKI_CUDA_SUCCESS) {
 		if (error)
 			*error = cuError("Frame synthesis kernel", r);
+		return false;
+	}
+	return true;
+}
+
+bool OfaInterpolator::ensureMask(std::string *error)
+{
+	if (d->nzones <= 0 || d->mask_valid)
+		return true;
+	// once per pair: protection weight = feathered zone x "barely changes between originals"
+	const int i1 = d->cur, i0 = d->cur ^ 1;
+	CUdeviceptr y0 = d->hist_luma[i0], y1 = d->hist_luma[i1];
+	unsigned int y0p = static_cast<unsigned int>(d->hist_luma_pitch[i0]);
+	unsigned int y1p = static_cast<unsigned int>(d->hist_luma_pitch[i1]);
+	int ww = w, hh = h;
+	CUdeviceptr zones = d->zones, mask = d->mask;
+	int nzones = d->nzones, mask_pitch = w;
+	float feather = std::max(8.0f, 24.0f * h / 1080.0f);
+	float static_lo = 3.0f, static_hi = 10.0f;
+	void *margs[] = { &y0, &y0p, &y1, &y1p, &ww, &hh, &zones, &nzones, &feather, &static_lo, &static_hi, &mask, &mask_pitch };
+	const CUresult r = d->cu->cuLaunchKernel(fmt == PixelLayout::P010 ? d->k_mask16 : d->k_mask8,
+	                                         divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, margs, nullptr);
+	if (r != CHIAKI_CUDA_SUCCESS) {
+		if (error)
+			*error = cuError("Protected zone mask kernel", r);
+		return false;
+	}
+	d->mask_valid = true;
+	return true;
+}
+
+bool OfaInterpolator::extrapolate(float s, const GpuFrame &dst, std::string *error)
+{
+	if (!initialized() || !d->pair_valid || s <= 0.0f || s >= 1.0f) {
+		if (error)
+			*error = "No valid frame pair to extrapolate from";
+		return false;
+	}
+	const CudaApi *cu = d->cu;
+	CudaContextScope scope(ctx);
+	if (!ensureMask(error))
+		return false;
+	const int i1 = d->cur;
+	int bw = d->bw, bh = d->bh;
+	float grid = static_cast<float>(d->grid);
+	CUdeviceptr f10 = d->f10, v1 = d->vis1;
+	const bool hi = fmt == PixelLayout::P010;
+	CUdeviceptr mask = d->nzones > 0 ? d->mask : 0;
+	int mask_pitch = w;
+
+	CUdeviceptr y1 = d->hist_luma[i1], yd = dst.luma;
+	unsigned int y1p = static_cast<unsigned int>(d->hist_luma_pitch[i1]);
+	unsigned int ydp = static_cast<unsigned int>(dst.luma_pitch);
+	int ww = w, hh = h;
+	void *largs[] = { &y1, &y1p, &yd, &ydp, &ww, &hh, &f10, &v1, &bw, &bh, &grid, &s, &mask, &mask_pitch };
+	CUresult r = cu->cuLaunchKernel(hi ? d->k_ext_luma16 : d->k_ext_luma8, divUp(w, 32), divUp(h, 8), 1, 32, 8, 1, 0, cu_stream, largs, nullptr);
+	if (r == CHIAKI_CUDA_SUCCESS) {
+		CUdeviceptr c1 = d->hist_chroma[i1], cd = dst.chroma;
+		unsigned int c1p = static_cast<unsigned int>(d->hist_chroma_pitch[i1]);
+		unsigned int cdp = static_cast<unsigned int>(dst.chroma_pitch);
+		int cw = w / 2, ch = h / 2;
+		void *cargs[] = { &c1, &c1p, &cd, &cdp, &cw, &ch, &f10, &v1, &bw, &bh, &grid, &s, &mask, &mask_pitch };
+		r = cu->cuLaunchKernel(hi ? d->k_ext_chroma16 : d->k_ext_chroma8, divUp(cw, 32), divUp(ch, 8), 1, 32, 8, 1, 0, cu_stream, cargs, nullptr);
+	}
+	if (r != CHIAKI_CUDA_SUCCESS) {
+		if (error)
+			*error = cuError("Frame extrapolation kernel", r);
 		return false;
 	}
 	return true;
@@ -809,8 +867,10 @@ double psnr(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b, int w,
 
 } // namespace
 
-bool OfaInterpolator::selfTest(CUcontext ctx, std::string *report, int w, int h, PixelLayout layout)
+bool OfaInterpolator::selfTest(CUcontext ctx, std::string *report, int w, int h, PixelLayout layout, bool *extrapolation_ok)
 {
+	if (extrapolation_ok)
+		*extrapolation_ok = false;
 	std::string err;
 	const CudaApi *cu = cudaApi();
 	if (!cu) {
@@ -1025,6 +1085,120 @@ bool OfaInterpolator::selfTest(CUcontext ctx, std::string *report, int w, int h,
 			}
 		}
 		ip.setProtectedZones({}, nullptr);
+	}
+	// Low-latency mode: predict 1/4..3/4 of a frame ahead of the newest original from the
+	// motion of the last pair. It cannot see what gets uncovered behind moving objects, so
+	// the bar is lower than for interpolation, but it must clearly beat holding the original.
+	if (ok) {
+		bool ext_ok = true;
+		std::string ext_err;
+		std::vector<uint8_t> el1, ec1;
+		ip.reset();
+		for (int f = 0; ext_ok && f < 3; f++) {
+			std::vector<uint8_t> l, c;
+			renderScene(sp, static_cast<float>(f), w, h, l, c);
+			if (f == 2) { el1 = l; ec1 = c; }
+			ext_ok = upload(l, c);
+			if (ext_ok) {
+				pa = ip.pushFrame(in, &ext_err);
+				ext_ok = ext_err.empty() && (f < 2 || pa.valid);
+			}
+		}
+		for (float s : { 0.25f, 0.5f, 0.75f }) {
+			if (!ext_ok)
+				break;
+			ext_ok = ip.extrapolate(s, out, &ext_err) && download(res, res_c);
+			if (!ext_ok)
+				break;
+			renderScene(sp, 2.0f + s, w, h, gt, gc);
+			const double p_gen = psnr(res, gt, w, h, border);
+			const double p_hold = psnr(el1, gt, w, h, border);
+			const double p_chroma = psnr(res_c, gc, w, h / 2, border / 2);
+			const bool pass = p_gen >= 24.0 && p_gen >= p_hold + 3.0 && p_chroma >= 28.0;
+			snprintf(line, sizeof(line), "extrapolate s=%.2f generated %.2f dB (chroma %.2f dB) | hold original %.2f dB -> %s\n",
+			         s, p_gen, p_chroma, p_hold, pass ? "ok" : "FAIL");
+			log += line;
+			if (!pass) {
+				ext_ok = false;
+				ext_err = "extrapolated frame does not match the expected motion";
+			}
+		}
+		// Protected zone: the HUD must stay exactly the newest original while the background
+		// behind it keeps moving.
+		if (ext_ok) {
+			SceneParams hp = sp;
+			hp.fg_size = 0.0f;
+			hp.bg_vx = 14.0f;
+			hp.bg_vy = 3.0f;
+			hp.hud_x = std::floor(w * 0.06f);
+			hp.hud_y = std::floor(h * 0.62f);
+			hp.hud_w = std::floor(w * 0.16f);
+			hp.hud_h = std::floor(h * 0.20f);
+			std::vector<ProtectedZone> zones(1);
+			zones[0].x0 = (hp.hud_x - w * 0.04f) / w;
+			zones[0].y0 = (hp.hud_y - h * 0.08f) / h;
+			zones[0].x1 = (hp.hud_x + hp.hud_w + w * 0.06f) / w;
+			zones[0].y1 = (hp.hud_y + hp.hud_h + h * 0.08f) / h;
+			std::vector<uint8_t> hl1;
+			ip.reset();
+			for (int f = 0; ext_ok && f < 3; f++) {
+				std::vector<uint8_t> l, c;
+				renderScene(hp, static_cast<float>(f), w, h, l, c);
+				if (f == 2)
+					hl1 = l;
+				ext_ok = upload(l, c);
+				if (ext_ok) {
+					pa = ip.pushFrame(in, &ext_err);
+					ext_ok = ext_err.empty() && (f < 2 || pa.valid);
+				}
+			}
+			ext_ok = ext_ok && ip.setProtectedZones(zones, &ext_err);
+			const int feather = static_cast<int>(std::max(8.0f, 24.0f * h / 1080.0f));
+			const int zx0 = static_cast<int>(zones[0].x0 * w) + feather, zx1 = static_cast<int>(zones[0].x1 * w) - feather;
+			const int zy0 = static_cast<int>(zones[0].y0 * h) + feather, zy1 = static_cast<int>(zones[0].y1 * h) - feather;
+			const int hx0 = static_cast<int>(hp.hud_x), hx1 = static_cast<int>(hp.hud_x + hp.hud_w);
+			const int hy0 = static_cast<int>(hp.hud_y), hy1 = static_cast<int>(hp.hud_y + hp.hud_h);
+			for (float s : { 0.25f, 0.5f, 0.75f }) {
+				if (!ext_ok)
+					break;
+				ext_ok = ip.extrapolate(s, out, &ext_err) && download(res, res_c);
+				if (!ext_ok)
+					break;
+				renderScene(hp, 2.0f + s, w, h, gt, gc);
+				size_t hud_mismatch = 0;
+				for (int y = hy0 + 4; y < hy1 - 4; y++)
+					for (int x = hx0 + 4; x < hx1 - 4; x++)
+						hud_mismatch += res[static_cast<size_t>(y) * w + x] != hl1[static_cast<size_t>(y) * w + x];
+				double se_bg = 0.0, se_frozen = 0.0;
+				size_t n_bg = 0;
+				for (int y = zy0; y < zy1; y++)
+					for (int x = zx0; x < zx1; x++) {
+						if (x >= hx0 - 6 && x < hx1 + 6 && y >= hy0 - 6 && y < hy1 + 6)
+							continue;
+						const size_t i = static_cast<size_t>(y) * w + x;
+						const double dg = static_cast<double>(res[i]) - gt[i];
+						const double df = static_cast<double>(hl1[i]) - gt[i];
+						se_bg += dg * dg;
+						se_frozen += df * df;
+						n_bg++;
+					}
+				const auto to_psnr = [](double se, size_t n) { return se <= 1e-9 ? 99.0 : 10.0 * log10(255.0 * 255.0 * n / se); };
+				const double p_bg = to_psnr(se_bg, n_bg), p_frozen = to_psnr(se_frozen, n_bg);
+				const bool pass = hud_mismatch == 0 && p_bg >= p_frozen + 3.0;
+				snprintf(line, sizeof(line), "extrapolate protected zone s=%.2f: HUD %zu px differ | background in zone %.2f dB (frozen would be %.2f dB) -> %s\n",
+				         s, hud_mismatch, p_bg, p_frozen, pass ? "ok" : "FAIL");
+				log += line;
+				if (!pass) {
+					ext_ok = false;
+					ext_err = "protected zone not applied correctly when extrapolating";
+				}
+			}
+			ip.setProtectedZones({}, nullptr);
+		}
+		if (!ext_ok)
+			log += "low-latency mode unavailable: " + (ext_err.empty() ? std::string("self test failed") : ext_err) + "\n";
+		if (extrapolation_ok)
+			*extrapolation_ok = ext_ok;
 	}
 	if (y_buf) cu->cuMemFree(y_buf);
 	if (c_buf) cu->cuMemFree(c_buf);

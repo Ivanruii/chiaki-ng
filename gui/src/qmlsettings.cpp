@@ -1004,6 +1004,26 @@ void QmlSettings::setFrameGeneration(int index)
     emit frameGenerationChanged();
 }
 
+bool QmlSettings::frameGenerationLowLatency() const
+{
+    return settings->GetFrameGenerationLowLatency();
+}
+
+void QmlSettings::setFrameGenerationLowLatency(bool enabled)
+{
+    if (enabled == settings->GetFrameGenerationLowLatency())
+        return;
+    settings->SetFrameGenerationLowLatency(enabled);
+    emit frameGenerationChanged();
+}
+
+void QmlSettings::setFrameGenerationLowLatencyCapability(bool available, const QString &reason)
+{
+    fg_low_latency_available = available;
+    fg_low_latency_reason = reason;
+    emit frameGenerationCapabilitiesChanged();
+}
+
 int QmlSettings::frameGenerationSourceFps() const
 {
     const unsigned int fps = settings->GetVideoProfileLocalPS5().max_fps;

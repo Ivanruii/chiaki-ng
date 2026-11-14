@@ -289,6 +289,7 @@ private:
     void startFrameGenerationProbe();
     void publishFrameGenerationCapabilities();
     int resolveFrameGenerationMultiplier(int requested, QString *reason);
+    bool resolveFrameGenerationLowLatency();
     void applyFrameGenerationSetting();
     void stopFrameGenerator();
 

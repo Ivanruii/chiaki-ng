@@ -9,12 +9,16 @@
 // stay on the GPU: CUDA frames are copied into Vulkan images through FFmpeg's CUDA/Vulkan
 // external-memory interop, so libplacebo maps them without a CPU round trip.
 //
-// Timing: when original N arrives, the frames between N-1 and N are generated at
-// k/multiplier of the real interval and released at evenly spaced wall-clock times, followed
-// by original N. The schedule starts once the pair is processed (smoothed processing delay),
+// Timing (interpolation, the default): when original N arrives, the frames between N-1 and
+// N are generated at k/multiplier of the real interval and released at evenly spaced
+// wall-clock times, followed by original N. The schedule starts once the pair is processed (smoothed processing delay),
 // so originals are delayed by that delay plus (multiplier-1)/multiplier of a source frame
 // interval. Generated frames that would be late, or that the display/renderer cannot
 // take, are dropped; originals are never dropped by this stage.
+//
+// Timing (low-latency mode): original N is released as soon as it is decoded, then the
+// frames N + k/multiplier are predicted from N and the motion between N-1 and N and released
+// evenly after it. No hold of the original; generated frames are guesses about the future.
 
 #ifndef CHIAKI_FRAMEGEN_FRAMEGENERATOR_H
 #define CHIAKI_FRAMEGEN_FRAMEGENERATOR_H
@@ -60,6 +64,8 @@ struct Capabilities
 	QString nvfruc;           // NvFRUC library status
 	QString self_test_report; // per-position quality numbers of the GPU self test
 	ModeAvailability modes[kMaxMultiplier + 1]; // index = multiplier (2..4)
+	bool low_latency_available = false; // extrapolation passed its part of the self test
+	QString low_latency_reason;         // why it is unavailable
 
 	QVariantList toVariantList() const; // [{multiplier, enabled, reason, backend}, ...] for QML
 };
@@ -99,6 +105,7 @@ public:
 	struct Config
 	{
 		int multiplier = 2;
+		bool low_latency = false;             // extrapolate instead of interpolate
 		double source_fps = 60.0;
 		double display_hz = 0.0;              // 0 = unknown
 		AVBufferRef *cuda_device = nullptr;   // from probeCapabilities()
@@ -128,6 +135,13 @@ public:
 	// 1 = pass-through. Takes effect on the next original and resets the interpolator.
 	void setMultiplier(int multiplier);
 	int multiplier() const { return requested_multiplier.load(); }
+
+	// Low-latency mode: originals are shown as soon as they are decoded and the generated
+	// frames are predicted forward from them (extrapolation) instead of interpolated between
+	// two originals. Removes the hold of the original at the cost of artifacts where motion
+	// changes or content gets uncovered. Takes effect on the next original.
+	void setLowLatency(bool enabled);
+	bool lowLatency() const { return requested_low_latency.load(); }
 	// Multiplier actually applied (1 after a runtime failure or while off)
 	int effectiveMultiplier() const { return effective_multiplier.load(); }
 
@@ -156,6 +170,7 @@ private:
 	AVFrame *toPresentable(AVFrame *cuda_frame, QString *error);
 	void deliver(Output &out);
 	void setStatus(const QString &status);
+	QString activeStatusText() const;
 	void disableGeneration(const QString &reason);
 
 	Config cfg;
@@ -170,6 +185,8 @@ private:
 	std::vector<float> zones_xywh; // guarded by mutex
 	bool zones_dirty = false;       // guarded by mutex
 	int active_multiplier = 1;
+	std::atomic<bool> requested_low_latency{false};
+	bool active_low_latency = false;      // worker thread
 
 	// worker-thread state
 	std::unique_ptr<OfaInterpolator> engine;

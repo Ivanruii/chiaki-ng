@@ -104,6 +104,9 @@ class QmlSettings : public QObject
 	Q_PROPERTY(bool directFrameMapping READ directFrameMapping WRITE setDirectFrameMapping NOTIFY directFrameMappingChanged)
 	Q_PROPERTY(int frameGeneration READ frameGeneration WRITE setFrameGeneration NOTIFY frameGenerationChanged)
 	Q_PROPERTY(int frameGenerationSourceFps READ frameGenerationSourceFps NOTIFY frameGenerationChanged)
+	Q_PROPERTY(bool frameGenerationLowLatency READ frameGenerationLowLatency WRITE setFrameGenerationLowLatency NOTIFY frameGenerationChanged)
+	Q_PROPERTY(bool frameGenerationLowLatencyAvailable READ frameGenerationLowLatencyAvailable NOTIFY frameGenerationCapabilitiesChanged)
+	Q_PROPERTY(QString frameGenerationLowLatencyReason READ frameGenerationLowLatencyReason NOTIFY frameGenerationCapabilitiesChanged)
 	Q_PROPERTY(QVariantList frameGenerationModes READ frameGenerationModes NOTIFY frameGenerationCapabilitiesChanged)
 	Q_PROPERTY(bool frameGenerationProbing READ frameGenerationProbing NOTIFY frameGenerationCapabilitiesChanged)
 	Q_PROPERTY(QString frameGenerationSummary READ frameGenerationSummary NOTIFY frameGenerationCapabilitiesChanged)
@@ -367,6 +370,12 @@ public:
     int frameGeneration() const;
     void setFrameGeneration(int index);
     int frameGenerationSourceFps() const;
+    // Low-latency method (extrapolation) instead of interpolation
+    bool frameGenerationLowLatency() const;
+    void setFrameGenerationLowLatency(bool enabled);
+    bool frameGenerationLowLatencyAvailable() const { return fg_low_latency_available; }
+    QString frameGenerationLowLatencyReason() const { return fg_low_latency_reason; }
+    void setFrameGenerationLowLatencyCapability(bool available, const QString &reason);
     QVariantList frameGenerationModes() const { return fg_modes; }
     bool frameGenerationProbing() const { return fg_probing; }
     QString frameGenerationSummary() const { return fg_summary; }
@@ -821,6 +830,8 @@ private:
     QString fg_nvfruc;
     QString fg_self_test;
     QString fg_effective;
+    bool fg_low_latency_available = false;
+    QString fg_low_latency_reason;
     QStringList audio_in_devices;
     QStringList audio_out_devices;
 };

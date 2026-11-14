@@ -94,6 +94,11 @@ public:
 	// Work is enqueued on stream(); call synchronize() before the CPU or another API reads dst.
 	bool synthesize(float t, const GpuFrame &dst, std::string *error);
 
+	// Low-latency mode: predicts the frame at time 1+s, s in (0,1), after the newest pushed
+	// frame from that frame and the motion of the last pair (no wait for the next original).
+	// Same stream rules as synthesize().
+	bool extrapolate(float s, const GpuFrame &dst, std::string *error);
+
 	bool synchronize(std::string *error);
 
 	// Areas (e.g. a game HUD) where generated frames show the temporally nearest original
@@ -103,10 +108,14 @@ public:
 	// Synthetic-motion self test: renders frames at 1/4..3/4 of a known motion and checks
 	// that they match the ground truth far better than repeating or blending the originals.
 	// Returns false and fills *report with details when the generated frames are wrong.
+	// The low-latency (extrapolation) mode is checked too; its result goes to
+	// *extrapolation_ok and does not affect the return value.
 	static bool selfTest(CUcontext ctx, std::string *report, int width = 640, int height = 368,
-	                     PixelLayout layout = PixelLayout::NV12);
+	                     PixelLayout layout = PixelLayout::NV12, bool *extrapolation_ok = nullptr);
 
 private:
+	bool ensureMask(std::string *error);
+
 	struct Impl;
 	Impl *d;
 	CUcontext ctx = nullptr;

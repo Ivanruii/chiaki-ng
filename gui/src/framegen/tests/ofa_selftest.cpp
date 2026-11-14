@@ -15,7 +15,7 @@
 
 using namespace framegen;
 
-static bool benchmark(int w, int h, PixelLayout layout, int multiplier)
+static bool benchmark(int w, int h, PixelLayout layout, int multiplier, bool extrapolate = false)
 {
 	const CudaApi *cu = cudaApi();
 	CUdevice dev = 0;
@@ -105,7 +105,8 @@ static bool benchmark(int w, int h, PixelLayout layout, int multiplier)
 		bool synthesized = false;
 		if (pa.valid) {
 			for (int j = 1; j < multiplier; j++)
-				if (!ip.synthesize(static_cast<float>(j) / multiplier, out, &err)) {
+				if (!(extrapolate ? ip.extrapolate(static_cast<float>(j) / multiplier, out, &err)
+				                  : ip.synthesize(static_cast<float>(j) / multiplier, out, &err))) {
 					printf("synth failed: %s\n", err.c_str());
 					return false;
 				}
@@ -120,8 +121,8 @@ static bool benchmark(int w, int h, PixelLayout layout, int multiplier)
 			measured++;
 		}
 	}
-	printf("%dx%d %s x%d: flow(GPU) %.2f ms avg, pair total(wall) %.2f ms avg / %.2f ms worst over %d pairs\n",
-	       w, h, layout == PixelLayout::P010 ? "P010" : "NV12", multiplier,
+	printf("%dx%d %s x%d%s: flow(GPU) %.2f ms avg, pair total(wall) %.2f ms avg / %.2f ms worst over %d pairs\n",
+	       w, h, layout == PixelLayout::P010 ? "P010" : "NV12", multiplier, extrapolate ? " low-latency" : "",
 	       total_flow_ms / std::max(measured, 1), total_wall_ms / std::max(measured, 1), worst_wall_ms, measured);
 	for (int i = 0; i < frames; i++) {
 		cu->cuMemFree(src_y[i]);
@@ -155,13 +156,16 @@ int main()
 	};
 	for (auto &c : cases) {
 		std::string report;
-		const bool ok = OfaInterpolator::selfTest(ctx, &report, c.w, c.h, c.layout);
-		printf("self test %dx%d %s: %s\n%s", c.w, c.h, c.name, ok ? "PASS" : "FAIL", report.c_str());
-		failures += ok ? 0 : 1;
+		bool ext_ok = false;
+		const bool ok = OfaInterpolator::selfTest(ctx, &report, c.w, c.h, c.layout, &ext_ok);
+		printf("self test %dx%d %s: %s, low-latency %s\n%s", c.w, c.h, c.name, ok ? "PASS" : "FAIL",
+		       ext_ok ? "PASS" : "FAIL", report.c_str());
+		failures += ok && ext_ok ? 0 : 1;
 	}
 	for (int m = 2; m <= 4; m++)
 		failures += benchmark(1920, 1080, PixelLayout::NV12, m) ? 0 : 1;
 	failures += benchmark(1920, 1080, PixelLayout::P010, 4) ? 0 : 1;
+	failures += benchmark(1920, 1080, PixelLayout::NV12, 4, true) ? 0 : 1;
 	failures += benchmark(3840, 2160, PixelLayout::NV12, 2) ? 0 : 1;
 	printf("%s\n", failures ? "FAILED" : "ALL PASSED");
 	return failures ? 1 : 0;

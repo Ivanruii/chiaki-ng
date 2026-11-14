@@ -18,6 +18,8 @@
 //      I0(p) and I1(q) and blending them with visibility-weighted temporal weights.
 // Steps 1-4 run once per pair; step 5 runs once per requested position (1/2 for x2,
 // 1/3 and 2/3 for x3, 1/4, 1/2 and 3/4 for x4), reusing the same flow.
+// Low-latency mode replaces step 5 with fg_extrap_*: frames 1/4..3/4 of a frame interval
+// AFTER I1 are predicted from I1 and F10, so I1 can be shown as soon as it is decoded.
 
 struct FgFlow { float x, y; };
 
@@ -114,6 +116,31 @@ __device__ __forceinline__ void fg_trace(const FgFlow *flow, int bw, int bh, flo
 		const FgFlow f = fg_load_flow(flow, bw, bh, fg_to_grid(px, grid), fg_to_grid(py, grid));
 		px = x - t * f.x;
 		py = y - t * f.y;
+	}
+}
+
+// Extrapolation (low-latency mode): the frame at time 1+s, s in (0,1), is predicted from I1
+// alone, assuming its content keeps moving as it did between I0 and I1. Content at q in I1
+// moved by -F10(q) per frame, so it lands on x = q - s*F10(q); solve for q by fixed-point
+// iteration. Vectors that failed the forward/backward check are damped towards zero, so
+// unreliable areas stay still instead of being pushed along a wrong vector.
+__device__ __forceinline__ float fg_extrap_confidence(float vis)
+{
+	return fg_clampf((vis - 0.15f) * 2.0f, 0.0f, 1.0f);
+}
+
+__device__ __forceinline__ void fg_trace_extrap(const FgFlow *f10, const float *vis1, int bw, int bh, float grid, float s,
+                                                float x, float y, float &qx, float &qy)
+{
+	qx = x;
+	qy = y;
+#pragma unroll
+	for (int i = 0; i < 4; i++) {
+		const float gx = fg_to_grid(qx, grid), gy = fg_to_grid(qy, grid);
+		const FgFlow f = fg_load_flow(f10, bw, bh, gx, gy);
+		const float c = fg_extrap_confidence(fg_load_scalar(vis1, bw, bh, gx, gy));
+		qx = x + s * c * f.x;
+		qy = y + s * c * f.y;
 	}
 }
 
@@ -339,6 +366,62 @@ __global__ void NAME(const unsigned char *uv0p, unsigned int uv0_pitch, const un
 	row[2 * x] = fg_store<T>(m * nu + (1.0f - m) * (w0 * u0 + w1 * u1), MAXV); \
 	row[2 * x + 1] = fg_store<T>(m * nv + (1.0f - m) * (w0 * vv0 + w1 * vv1), MAXV); \
 }
+
+// Extrapolated frame at time 1+s from I1 (see fg_trace_extrap). Protected pixels keep I1.
+#define FG_EXTRAP_LUMA(NAME, T, MAXV) \
+__global__ void NAME(const unsigned char *y1p, unsigned int y1_pitch, unsigned char *dst, unsigned int dst_pitch, int w, int h, \
+                     const FgFlow *f10, const float *vis1, int bw, int bh, float grid, float s, \
+                     const unsigned char *mask, int mask_pitch) \
+{ \
+	const int x = blockIdx.x * blockDim.x + threadIdx.x; \
+	const int y = blockIdx.y * blockDim.y + threadIdx.y; \
+	if (x >= w || y >= h) \
+		return; \
+	const float m = mask ? mask[(size_t)y * mask_pitch + x] * (1.0f / 255.0f) : 0.0f; \
+	const float nearest = (float)reinterpret_cast<const T *>(y1p + (size_t)y * y1_pitch)[x]; \
+	if (m >= 0.999f) { \
+		reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = (T)nearest; \
+		return; \
+	} \
+	float qx, qy; \
+	fg_trace_extrap(f10, vis1, bw, bh, grid, s, (float)x + 0.5f, (float)y + 0.5f, qx, qy); \
+	const float s1 = fg_sample1<T>(y1p, y1_pitch, w, h, qx, qy); \
+	reinterpret_cast<T *>(dst + (size_t)y * dst_pitch)[x] = fg_store<T>(m * nearest + (1.0f - m) * s1, MAXV); \
+}
+
+#define FG_EXTRAP_CHROMA(NAME, T, MAXV) \
+__global__ void NAME(const unsigned char *uv1p, unsigned int uv1_pitch, unsigned char *dst, unsigned int dst_pitch, int cw, int ch, \
+                     const FgFlow *f10, const float *vis1, int bw, int bh, float grid, float s, \
+                     const unsigned char *mask, int mask_pitch) \
+{ \
+	const int x = blockIdx.x * blockDim.x + threadIdx.x; \
+	const int y = blockIdx.y * blockDim.y + threadIdx.y; \
+	if (x >= cw || y >= ch) \
+		return; \
+	float m = 0.0f; \
+	if (mask) { \
+		const unsigned char *m0 = mask + (size_t)(2 * y) * mask_pitch + 2 * x; \
+		m = (m0[0] + m0[1] + m0[mask_pitch] + m0[mask_pitch + 1]) * (1.0f / (4.0f * 255.0f)); \
+	} \
+	const T *nsrc = reinterpret_cast<const T *>(uv1p + (size_t)y * uv1_pitch); \
+	const float nu = (float)nsrc[2 * x], nv = (float)nsrc[2 * x + 1]; \
+	T *row = reinterpret_cast<T *>(dst + (size_t)y * dst_pitch); \
+	if (m >= 0.999f) { \
+		row[2 * x] = (T)nu; \
+		row[2 * x + 1] = (T)nv; \
+		return; \
+	} \
+	float qx, qy, u1, v1; \
+	fg_trace_extrap(f10, vis1, bw, bh, grid, s, ((float)x + 0.5f) * 2.0f, ((float)y + 0.5f) * 2.0f, qx, qy); \
+	fg_sample2<T>(uv1p, uv1_pitch, cw, ch, qx * 0.5f, qy * 0.5f, u1, v1); \
+	row[2 * x] = fg_store<T>(m * nu + (1.0f - m) * u1, MAXV); \
+	row[2 * x + 1] = fg_store<T>(m * nv + (1.0f - m) * v1, MAXV); \
+}
+
+FG_EXTRAP_LUMA(fg_extrap_luma8, unsigned char, 255.0f)
+FG_EXTRAP_CHROMA(fg_extrap_chroma8, unsigned char, 255.0f)
+FG_EXTRAP_LUMA(fg_extrap_luma16, unsigned short, 65535.0f)
+FG_EXTRAP_CHROMA(fg_extrap_chroma16, unsigned short, 65535.0f)
 
 FG_SYNTH_LUMA(fg_synth_luma8, unsigned char, 255.0f)
 FG_SYNTH_CHROMA(fg_synth_chroma8, unsigned char, 255.0f)

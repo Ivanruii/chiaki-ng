@@ -134,6 +134,8 @@ Capabilities probeCapabilities(const ProbeInput &input, AVBufferRef **cuda_devic
 		for (int m = 2; m <= kMaxMultiplier; m++)
 			caps.modes[m] = { false, reason, QString() };
 		caps.summary = reason;
+		caps.low_latency_available = false;
+		caps.low_latency_reason = reason;
 		return caps;
 	};
 	if (cuda_device)
@@ -172,7 +174,8 @@ Capabilities probeCapabilities(const ProbeInput &input, AVBufferRef **cuda_devic
 	}
 
 	std::string report;
-	const bool test_ok = OfaInterpolator::selfTest(cuda_hw->cuda_ctx, &report);
+	bool extrapolation_ok = false;
+	const bool test_ok = OfaInterpolator::selfTest(cuda_hw->cuda_ctx, &report, 640, 368, PixelLayout::NV12, &extrapolation_ok);
 	caps.self_test_report = QString::fromStdString(report).trimmed();
 	qCInfo(chiakiFrameGen).noquote() << "Frame generation GPU self test" << (test_ok ? "passed" : "FAILED")
 	                                 << "on" << caps.gpu << "\n" << caps.self_test_report;
@@ -183,6 +186,8 @@ Capabilities probeCapabilities(const ProbeInput &input, AVBufferRef **cuda_devic
 	for (int m = 2; m <= kMaxMultiplier; m++)
 		caps.modes[m] = { true, QString(), QString::fromUtf8(kBackendName) };
 	caps.summary = tr("Available on %1").arg(caps.gpu);
+	caps.low_latency_available = extrapolation_ok;
+	caps.low_latency_reason = extrapolation_ok ? QString() : tr("GPU self test of the low-latency mode failed");
 	if (cuda_device)
 		*cuda_device = cuda;
 	else
@@ -230,9 +235,9 @@ bool FrameGenerator::start(const Config &config, QString *error)
 		std::lock_guard<std::mutex> lock(stats_mutex);
 		st = FrameGeneratorStats();
 	}
-	setStatus(cfg.multiplier > 1
-		? tr("x%1 active: %2").arg(cfg.multiplier).arg(targetFpsText(cfg.source_fps, cfg.multiplier))
-		: tr("Off"));
+	requested_low_latency.store(cfg.low_latency);
+	active_low_latency = cfg.low_latency;
+	setStatus(activeStatusText());
 	worker = std::thread([this]() { run(); });
 	return true;
 }
@@ -291,6 +296,20 @@ void FrameGenerator::setProtectedZones(const std::vector<float> &xywh)
 	std::lock_guard<std::mutex> lock(mutex);
 	zones_xywh = xywh;
 	zones_dirty = true;
+}
+
+void FrameGenerator::setLowLatency(bool enabled)
+{
+	requested_low_latency.store(enabled);
+	cond.notify_one();
+}
+
+QString FrameGenerator::activeStatusText() const
+{
+	if (active_multiplier <= 1)
+		return tr("Off");
+	return (active_low_latency ? tr("x%1 low latency active: %2") : tr("x%1 active: %2"))
+		.arg(active_multiplier).arg(targetFpsText(cfg.source_fps, active_multiplier));
 }
 
 void FrameGenerator::setMultiplier(int multiplier)
@@ -503,9 +522,16 @@ void FrameGenerator::process(Input &in)
 			std::lock_guard<std::mutex> lock(stats_mutex);
 			st.resets++;
 		}
-		setStatus(active_multiplier > 1
-			? tr("x%1 active: %2").arg(active_multiplier).arg(targetFpsText(cfg.source_fps, active_multiplier))
-			: tr("Off"));
+		setStatus(activeStatusText());
+	}
+	const bool requested_ll = requested_low_latency.load();
+	if (requested_ll != active_low_latency) {
+		// The flow of the current pair stays valid in both modes: no reset needed, only a
+		// fresh schedule (pending frames of the old mode are flushed just below).
+		active_low_latency = requested_ll;
+		sched_delay_us = 0;
+		if (!generation_failed)
+			setStatus(activeStatusText());
 	}
 
 	// A new original supersedes everything still waiting: pending originals are released
@@ -560,6 +586,27 @@ void FrameGenerator::process(Input &in)
 		}
 	}
 
+	// Low-latency mode: the original is shown right away and the generated frames are
+	// predicted forward from it (extrapolation) instead of interpolated towards it.
+	const bool low_latency = active_low_latency && n > 1 && !generation_failed;
+	const double step = interval / std::max(n, 1);
+	const int64_t step_us = static_cast<int64_t>(step * 1e6);
+	int64_t original_shown_us = 0;
+	if (low_latency) {
+		AVFrame *original = toPresentable(src, &error);
+		if (original) {
+			ChiakiFfmpegFrame f = in.frame;
+			f.frame = original;
+			f.duration = step;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				outputs.push_back({ f, in.frames_lost, nowUs(), false });
+			}
+			emitDue(nowUs(), false);
+		}
+		original_shown_us = nowUs();
+	}
+
 	PairAnalysis pair;
 	if (n > 1 && engine) {
 		if (discontinuity)
@@ -574,8 +621,6 @@ void FrameGenerator::process(Input &in)
 	have_prev = true;
 	prev_pts = in.frame.pts;
 
-	const double step = interval / std::max(n, 1);
-	const int64_t step_us = static_cast<int64_t>(step * 1e6);
 	std::vector<Output> produced;
 	int generated_count = 0;
 
@@ -590,7 +635,8 @@ void FrameGenerator::process(Input &in)
 			}
 			const GpuFrame dst{ reinterpret_cast<CUdeviceptr>(cf->data[0]), static_cast<size_t>(cf->linesize[0]),
 			                    reinterpret_cast<CUdeviceptr>(cf->data[1]), static_cast<size_t>(cf->linesize[1]) };
-			if (!engine->synthesize(static_cast<float>(j) / n, dst, &engine_error)) {
+			const float pos = static_cast<float>(j) / n;
+			if (!(low_latency ? engine->extrapolate(pos, dst, &engine_error) : engine->synthesize(pos, dst, &engine_error))) {
 				av_frame_free(&cf);
 				disableGeneration(QString::fromStdString(engine_error));
 				break;
@@ -608,10 +654,12 @@ void FrameGenerator::process(Input &in)
 					const int j = static_cast<int>(k) + 1;
 					ChiakiFfmpegFrame f{};
 					f.frame = presentable;
-					f.pts = in.frame.pts - interval + j * step;
+					// interpolated: between the previous original and this one (slots 0..n-2,
+					// this original in slot n-1); extrapolated: after this original (slots 1..n-1)
+					f.pts = low_latency ? in.frame.pts + j * step : in.frame.pts - interval + j * step;
 					f.duration = step;
 					f.recovered = false;
-					produced.push_back({ f, 0, j - 1, true });
+					produced.push_back({ f, 0, low_latency ? j : j - 1, true });
 					generated_count++;
 				}
 			}
@@ -622,7 +670,7 @@ void FrameGenerator::process(Input &in)
 		st.skipped_pairs++;
 	}
 
-	AVFrame *original = toPresentable(src, &error);
+	AVFrame *original = low_latency ? nullptr : toPresentable(src, &error);
 	av_frame_free(&in.frame.frame);
 	if (original) {
 		ChiakiFfmpegFrame f = in.frame;
@@ -637,9 +685,12 @@ void FrameGenerator::process(Input &in)
 	// late by the whole processing time (at x4 that exceeds the late tolerance and the
 	// frame was always dropped). Anchor the schedule at arrival + a smoothed processing
 	// delay instead: the cadence stays even from pair to pair, and never earlier than now.
+	// In low-latency mode the schedule simply starts at the original, which is already shown.
 	const int64_t ready_us = nowUs();
 	int64_t base_us = ready_us;
-	if (n > 1) {
+	if (low_latency) {
+		base_us = original_shown_us;
+	} else if (n > 1) {
 		if (generated_count > 0) {
 			const int64_t delay_us = ready_us - in.arrival_us;
 			sched_delay_us = sched_delay_us <= 0 ? delay_us : sched_delay_us + (delay_us - sched_delay_us) / 8;
@@ -661,7 +712,7 @@ void FrameGenerator::process(Input &in)
 		snapshot = st;
 	}
 	if (log_stats)
-		qCInfo(chiakiFrameGen).nospace() << "x" << n << " originals=" << snapshot.originals << " generated=" << snapshot.generated
+		qCInfo(chiakiFrameGen).nospace() << "x" << n << (low_latency ? " low-latency" : "") << " originals=" << snapshot.originals << " generated=" << snapshot.generated
 		                                 << " dropped_late=" << snapshot.dropped_late << " dropped_backlog=" << snapshot.dropped_backlog
 		                                 << " skipped_pairs=" << snapshot.skipped_pairs << " resets=" << snapshot.resets
 		                                 << " last_pair_ms=" << snapshot.last_pair_ms << " flow_gpu_ms=" << pair.flow_ms

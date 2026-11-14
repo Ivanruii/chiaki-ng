@@ -975,6 +975,26 @@ Item {
                     }
                 }
 
+                RowLayout {
+                    spacing: 4
+                    Label { text: qsTr("Method:") }
+                    ToolButton {
+                        text: qsTr("Interpolation (quality)")
+                        checkable: true
+                        checked: !Chiaki.settings.frameGenerationLowLatency
+                        onClicked: Chiaki.settings.frameGenerationLowLatency = false
+                        Keys.onReturnPressed: clicked()
+                    }
+                    ToolButton {
+                        text: qsTr("Extrapolation (low latency)")
+                        checkable: true
+                        checked: Chiaki.settings.frameGenerationLowLatency
+                        enabled: Chiaki.settings.frameGenerationLowLatencyAvailable
+                        onClicked: Chiaki.settings.frameGenerationLowLatency = true
+                        Keys.onReturnPressed: clicked()
+                    }
+                }
+
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap

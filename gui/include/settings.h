@@ -526,6 +526,10 @@ class Settings : public QObject
 		// Frame generation multiplier: 1 = off, 2..4 = x2..x4 (stored as "off"/"x2"/"x3"/"x4")
 		int GetFrameGenerationMultiplier() const;
 		void SetFrameGenerationMultiplier(int multiplier);
+		// Low-latency frame generation: extrapolate after each original instead of interpolating
+		// between two (no hold of the original, more artifacts)
+		bool GetFrameGenerationLowLatency() const { return settings.value("settings/frame_generation_method", "interpolate").toString() == "extrapolate"; }
+		void SetFrameGenerationLowLatency(bool enabled) { settings.setValue("settings/frame_generation_method", enabled ? "extrapolate" : "interpolate"); }
 		// Protected zones (e.g. game HUD) of the active zone profile, normalized video coordinates (0..1)
 		QList<QRectF> GetFrameGenerationZones() const;
 		void SetFrameGenerationZones(const QList<QRectF> &zones);
